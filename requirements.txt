@@ -1,0 +1,15 @@
+# F1 Top-Down Car Simulation
+# Physics
+Box2D==2.3.10
+numpy>=1.24.0
+
+# Geometry (robust offset curves for track boundaries)
+shapely>=2.0.0
+
+# Rendering
+pygame>=2.5.0
+
+# RL (for later phases)
+gymnasium>=0.29.0
+stable-baselines3>=2.1.0
+
