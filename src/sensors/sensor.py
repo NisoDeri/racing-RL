@@ -15,6 +15,7 @@ Both produce numpy arrays suitable for neural network input.
 They can be used independently or concatenated for a richer observation.
 """
 import numpy as np
+from config import CAR
 
 
 class RayCaster:
@@ -54,7 +55,62 @@ class RayCaster:
             self.is_mirror[:num_mirror_rays] = True
             self.is_mirror[-num_mirror_rays:] = True
 
-    def cast(self, origin, heading, inner_boundary, outer_boundary):
+    def _intersect_segments_with_rays(self, origin, dirs, seg_starts, seg_ends, distances, hit_points):
+        """Update nearest hits for all rays against provided segments."""
+        AB = seg_ends - seg_starts
+        AO = origin - seg_starts
+        for r in range(self.num_rays):
+            d = dirs[r]
+            denom = d[0] * AB[:, 1] - d[1] * AB[:, 0]
+            valid = np.abs(denom) > 1e-10
+            if not np.any(valid):
+                continue
+
+            AO_v = AO[valid]
+            AB_v = AB[valid]
+            denom_v = denom[valid]
+
+            cross_ao_ab = AO_v[:, 0] * AB_v[:, 1] - AO_v[:, 1] * AB_v[:, 0]
+            cross_ao_d = AO_v[:, 0] * d[1] - AO_v[:, 1] * d[0]
+
+            t = -cross_ao_ab / denom_v
+            u = -cross_ao_d / denom_v
+
+            hits = (t > 0.01) & (u >= 0.0) & (u <= 1.0)
+            if np.any(hits):
+                min_t = np.min(t[hits])
+                if min_t < distances[r]:
+                    distances[r] = min_t
+                    hit_points[r] = origin + min_t * d
+
+    def _car_segments(self, cars, ego_car=None):
+        """Convert car rectangles to segment lists in world coordinates."""
+        starts, ends = [], []
+        half_l = CAR.length / 2.0
+        half_w = CAR.width / 2.0
+        local = np.array([
+            [half_l, half_w],
+            [half_l, -half_w],
+            [-half_l, -half_w],
+            [-half_l, half_w]
+        ], dtype=np.float64)
+
+        for c in (cars or []):
+            if ego_car is not None and c is ego_car:
+                continue
+            pos = np.asarray(c.position, dtype=np.float64)
+            a = float(c.angle)
+            rot = np.array([[np.cos(a), -np.sin(a)], [np.sin(a), np.cos(a)]], dtype=np.float64)
+            pts = (local @ rot.T) + pos
+            nxt = np.roll(pts, -1, axis=0)
+            starts.append(pts)
+            ends.append(nxt)
+
+        if not starts:
+            return None, None
+        return np.vstack(starts), np.vstack(ends)
+
+    def cast(self, origin, heading, inner_boundary, outer_boundary, cars=None, ego_car=None):
         """
         Cast all rays and find nearest wall intersection for each.
 
@@ -80,38 +136,17 @@ class RayCaster:
         for r in range(self.num_rays):
             hit_points[r] = origin + self.max_distance * dirs[r]
 
+        # walls
         for boundary in [inner_boundary, outer_boundary]:
-            n = len(boundary)
             A = boundary
             B = np.roll(boundary, -1, axis=0)
-            AB = B - A       # segment vectors (n, 2)
-            AO = origin - A  # origin relative to each segment start (n, 2)
+            self._intersect_segments_with_rays(origin, dirs, A, B, distances, hit_points)
 
-            for r in range(self.num_rays):
-                d = dirs[r]
-
-                denom = d[0] * AB[:, 1] - d[1] * AB[:, 0]
-                valid = np.abs(denom) > 1e-10
-
-                if not np.any(valid):
-                    continue
-
-                AO_v = AO[valid]
-                AB_v = AB[valid]
-                denom_v = denom[valid]
-
-                cross_ao_ab = AO_v[:, 0] * AB_v[:, 1] - AO_v[:, 1] * AB_v[:, 0]
-                cross_ao_d = AO_v[:, 0] * d[1] - AO_v[:, 1] * d[0]
-
-                t = -cross_ao_ab / denom_v   # ray parameter
-                u = -cross_ao_d / denom_v    # segment parameter
-
-                hits = (t > 0.01) & (u >= 0) & (u <= 1)
-                if np.any(hits):
-                    min_t = np.min(t[hits])
-                    if min_t < distances[r]:
-                        distances[r] = min_t
-                        hit_points[r] = origin + min_t * d
+        # cars as obstacles (optional)
+        if cars is not None:
+            A, B = self._car_segments(cars, ego_car=ego_car)
+            if A is not None:
+                self._intersect_segments_with_rays(origin, dirs, A, B, distances, hit_points)
 
         return distances, hit_points
 

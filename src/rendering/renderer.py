@@ -43,7 +43,7 @@ class Renderer:
         
         # Collision flash timer (frames remaining)
         self._flash_frames = 0
-        
+
     def world_to_screen(self, world_pos):
         """
         Convert world coordinates (meters) to screen coordinates (pixels).
@@ -135,7 +135,7 @@ class Renderer:
                 pygame.draw.line(self.screen, SECTOR_COLORS[color_idx], 
                                inner_scr, outer_scr, 2)
     
-    def draw_car(self, car, touching_wall=False):
+    def draw_car(self, car, touching_wall=False, touching_car=False):
         """
         Draw the car as a rectangle.
         Outline flashes red when touching a wall.
@@ -171,13 +171,20 @@ class Renderer:
         screen_corners = [self.world_to_screen(c) for c in rotated_corners]
         
         # Draw car body
-        pygame.draw.polygon(self.screen, RENDER.car_color, screen_corners)
-        
-        # Outline: RED if touching wall, WHITE normally
+        body_color = RENDER.car_color
+        if getattr(car, "is_static_control", False):
+            body_color = (70, 170, 255)
+        elif getattr(car, "is_main_player", False):
+            body_color = (230, 50, 50)
+        else:
+            body_color = (240, 150, 50)
+
+        pygame.draw.polygon(self.screen, body_color, screen_corners)
+
         if touching_wall:
-            outline_color = (255, 50, 50)
-            outline_width = 3
-            self._flash_frames = 10  # Keep flash for a few extra frames
+            outline_color, outline_width = (255, 50, 50), 3
+        elif touching_car:
+            outline_color, outline_width = (255, 0, 255), 3
         elif self._flash_frames > 0:
             outline_color = (255, 120, 50)  # Fading orange
             outline_width = 2
@@ -192,7 +199,7 @@ class Renderer:
         front_center = (rotated_corners[0] + rotated_corners[1]) / 2
         front_screen = self.world_to_screen(front_center)
         pygame.draw.circle(self.screen, (255, 255, 0), front_screen, 5)
-    
+
     def draw_point(self, position, color=(255, 0, 0), radius=5):
         """Draw a simple point (for debugging)."""
         screen_pos = self.world_to_screen(position)
@@ -267,7 +274,7 @@ class Renderer:
             is_mirror: (N,) bool mask
         """
         x = RENDER.screen_width - 260
-        y = 180
+        y = 200
         
         panel_w, panel_h = 260, 80
         panel_surface = pygame.Surface((panel_w, panel_h), pygame.SRCALPHA)
@@ -334,8 +341,8 @@ class Renderer:
         line_h = 22
         
         # Background panel
-        panel_rect = pygame.Rect(x - 10, y - 5, 260, 160)
-        panel_surface = pygame.Surface((260, 160), pygame.SRCALPHA)
+        panel_rect = pygame.Rect(x - 10, y - 5, 260, 182)
+        panel_surface = pygame.Surface((260, 182), pygame.SRCALPHA)
         panel_surface.fill((0, 0, 0, 160))
         self.screen.blit(panel_surface, (x - 10, y - 5))
         
@@ -377,7 +384,13 @@ class Renderer:
         if touching:
             hit_str += "  !! CONTACT !!"
         self._draw_text(hit_str, (x, y), hit_color)
-    
+        y += line_h
+
+        # Car hits
+        car_hits = lap_data.get('car_hits', 0)
+        hit_car_str = f"CAR HITS: {car_hits}"
+        self._draw_text(hit_car_str, (x, y), (220, 120, 255))
+
     def draw_hud(self, car, frenet_data=None):
         """
         Draw heads-up display with car info (left side).
@@ -471,3 +484,14 @@ class Renderer:
     def quit(self):
         """Clean up Pygame."""
         pygame.quit()
+
+    def draw_cars(self, cars, collision_handler=None):
+        """Draw all cars with per-car collision highlighting."""
+        for car in cars:
+            touching_wall = False
+            touching_car = False
+            if collision_handler is not None:
+                st = collision_handler.get_car_stats(car.car_id)
+                touching_wall = st['touching_wall']
+                touching_car = st['touching_car']
+            self.draw_car(car, touching_wall=touching_wall, touching_car=touching_car)

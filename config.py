@@ -13,9 +13,21 @@ class SimConfig:
     time_step: float = 1.0 / 60.0  # 60 FPS physics
     velocity_iterations: int = 8   # Box2D solver iterations
     position_iterations: int = 3
-    
+
     # World scale: pixels per meter
     pixels_per_meter: float = 20.0
+
+
+@dataclass
+class RaceConfig:
+    """Race/session settings"""
+    num_players: int = 3
+    enable_static_control_car: bool = True
+    static_control_speed: float = 28.0  # m/s
+    player_spawn_gap: float = 8.0       # meters along centerline
+    static_control_spawn_ahead: float = 10.0  # meters ahead of start line (along track direction)
+    startup_collision_grace_steps: int = 3     # ignore car-car counts for first N physics steps
+    min_safe_spawn_gap: float = 6.5            # hard floor to reduce overlap on spawn
 
 
 @dataclass
@@ -72,6 +84,7 @@ class SensorConfig:
     mirror_angle_end: float = np.radians(165)     # outer edge (closer to rear)
 
     max_ray_distance: float = 100.0    # meters
+    detect_cars_as_obstacles: bool = True
 
     # Frenet lookahead (curvature preview)
     num_lookahead: int = 10
@@ -91,7 +104,7 @@ class RenderConfig:
     track_border_color: tuple = (255, 255, 255)  # White lines
     centerline_color: tuple = (255, 200, 0)      # Yellow center
     car_color: tuple = (220, 30, 30)             # Ferrari red
-    
+
     # Camera
     follow_car: bool = True
     zoom: float = 1.0
@@ -99,8 +112,8 @@ class RenderConfig:
 
 # Global config instances
 SIM = SimConfig()
+RACE = RaceConfig()
 CAR = CarConfig()
 TRACK = TrackConfig()
 SENSOR = SensorConfig()
 RENDER = RenderConfig()
-

@@ -300,7 +300,47 @@ Since the observation space is track-agnostic, a key experiment is to train on o
 All tunable parameters live in `config.py` as dataclass instances:
 
 - **`SIM`** — Physics timestep, solver iterations, world scale
+- **`RACE`** — Multi-car race/session settings (players, static control car, spawn spacing)
 - **`CAR`** — Dimensions, mass, engine force, braking force, grip, drag
 - **`TRACK`** — Width, curvature samples, wall physics, sectors
 - **`SENSOR`** — Ray count, spread angles, mirror layout, max range
 - **`RENDER`** — Window size, colors, camera settings
+
+---
+
+## Multi-Car Simulation (New)
+
+The simulator now supports:
+- `RACE.num_players` dynamic player cars (main agent is index `0`)
+- optional `RACE.enable_static_control_car` centerline-following control car
+- car-to-car collision tracking in addition to wall collisions
+
+### New Config Keys (`config.py`)
+- `RACE.num_players`
+- `RACE.enable_static_control_car`
+- `RACE.static_control_speed` (m/s)
+- `RACE.player_spawn_gap` (meters along centerline)
+- `RACE.static_control_spawn_ahead` (meters ahead of start line)
+- `RACE.min_safe_spawn_gap` (minimum enforced spawn spacing)
+- `RACE.startup_collision_grace_steps` (ignore car-hit counting for first N physics steps)
+
+When `num_players=1` and static control car is disabled, behavior remains equivalent to the original single-car setup.
+
+---
+
+## Sensor update
+
+Ray sensors can now treat cars as obstacles (same way walls are handled in ray intersection tests).
+
+New config key:
+- `SENSOR.detect_cars_as_obstacles` (default `True`)
+
+When enabled, ray distance returns nearest hit among:
+- inner/outer track boundaries
+- other cars (ego car excluded)
+
+---
+
+## Startup contact note
+At initial load, Box2D can emit immediate contacts while bodies settle/spawn.  
+To avoid false `WALL HITS` / `CAR HITS`, counters are gated by `RACE.startup_collision_grace_steps` and reset logic is shared between first init and manual reset.

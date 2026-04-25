@@ -11,7 +11,7 @@ import os
 
 sys.path.insert(0, 'src')
 
-from config import SIM, RENDER, TRACK, SENSOR
+from config import SIM, RACE, RENDER, TRACK, SENSOR
 from src.physics.world import World
 from src.physics.car import Car
 from src.track.track import Track
@@ -23,6 +23,25 @@ TRACK_CATALOG = [
     ("Sprint Circuit",     Track.create_sprint_track),
     ("Grand Prix Circuit", Track.create_complex_track),
 ]
+
+
+def _spawn_player_cars(world, track, n):
+    cars = []
+    spawn_gap = max(RACE.player_spawn_gap, RACE.min_safe_spawn_gap)
+    for i in range(n):
+        s_i = (-i * spawn_gap) % track.total_length
+        pos, heading, _ = track.get_pose_at_s(s_i)
+        cars.append(Car(world, position=pos, angle=heading, car_id=i, is_main_player=(i == 0)))
+    return cars
+
+
+def _spawn_static_control_car(world, track, start_id):
+    # place control car AHEAD of start line
+    s_ctrl = RACE.static_control_spawn_ahead % track.total_length
+    pos, heading, _ = track.get_pose_at_s(s_ctrl)
+    car = Car(world, position=pos, angle=heading, car_id=start_id, is_static_control=True)
+    car.body.type = 2  # dynamic (kept in physics); controlled kinematically below
+    return car
 
 
 def load_track(track_idx, renderer):
@@ -39,6 +58,10 @@ def load_track(track_idx, renderer):
     print(f"  Centerline: {len(track.centerline)} pts")
 
     track.create_walls(world)
+
+    cars = _spawn_player_cars(world, track, RACE.num_players)
+    static_control_car = _spawn_static_control_car(world, track, len(cars)) if RACE.enable_static_control_car else None
+    all_cars = cars + ([static_control_car] if static_control_car is not None else [])
     inner, outer = track.get_boundary_points()
     checkpoints = track.get_checkpoint_positions()
     print(f"  {len(checkpoints)} sector lines")
@@ -52,7 +75,9 @@ def load_track(track_idx, renderer):
     renderer.zoom = (min(RENDER.screen_width, RENDER.screen_height)
                      / (max_span + 50) / SIM.pixels_per_meter)
 
-    return (world, track, car, inner, outer, checkpoints,
+    world.collision_handler.reset()
+    world.collision_handler.ignore_car_collision_count_until_step = RACE.startup_collision_grace_steps
+    return (world, track, cars, static_control_car, all_cars, inner, outer, checkpoints,
             start_pos, start_heading, name)
 
 
@@ -70,6 +95,30 @@ def handle_input(keys, car):
         steering = -1.0
 
     car.set_controls(throttle, steering)
+
+
+def _reset_race_state(world, track, cars, static_control_car):
+    spawn_gap = max(RACE.player_spawn_gap, RACE.min_safe_spawn_gap)
+    for idx, c in enumerate(cars):
+        s_i = (-idx * spawn_gap) % track.total_length
+        pos_i, heading_i, _ = track.get_pose_at_s(s_i)
+        c.body.position = (float(pos_i[0]), float(pos_i[1]))
+        c.body.angle = float(heading_i)
+        c.body.linearVelocity = (0.0, 0.0)
+        c.body.angularVelocity = 0.0
+
+    static_s = RACE.static_control_spawn_ahead % track.total_length
+    if static_control_car is not None:
+        p, h, _ = track.get_pose_at_s(static_s)
+        static_control_car.body.position = (float(p[0]), float(p[1]))
+        static_control_car.body.angle = float(h)
+        t = np.array([np.cos(h), np.sin(h)]) * RACE.static_control_speed
+        static_control_car.body.linearVelocity = (float(t[0]), float(t[1]))
+        static_control_car.body.angularVelocity = 0.0
+
+    world.collision_handler.reset()
+    world.collision_handler.ignore_car_collision_count_until_step = RACE.startup_collision_grace_steps
+    return static_s
 
 
 def main():
@@ -99,8 +148,10 @@ def main():
 
     # --- Load initial track ---
     track_idx = 1  # Start with GP circuit
-    (world, track, car, inner_boundary, outer_boundary, checkpoints,
+    (world, track, cars, static_control_car, all_cars, inner_boundary, outer_boundary, checkpoints,
      start_pos, start_heading, track_name) = load_track(track_idx, renderer)
+    car = cars[0]
+    static_s = _reset_race_state(world, track, cars, static_control_car)
 
     print("\n" + "=" * 50)
     print("Controls:")
@@ -135,24 +186,22 @@ def main():
                     running = False
 
                 elif event.key == pygame.K_r:
-                    car.body.position = start_pos
-                    car.body.angle = start_heading
-                    car.body.linearVelocity = (0, 0)
-                    car.body.angularVelocity = 0
+                    static_s = _reset_race_state(world, track, cars, static_control_car)
                     prev_s = 0.0
                     lap_start_time = time.time()
                     current_lap_time = 0.0
                     lap_count = 0
                     current_sector = 0
-                    world.collision_handler.reset()
                     print("Car reset to start position")
 
                 elif event.key == pygame.K_t:
                     track_idx = (track_idx + 1) % len(TRACK_CATALOG)
-                    (world, track, car,
-                     inner_boundary, outer_boundary, checkpoints,
+                    (world, track, cars,
+                     static_control_car, all_cars, inner_boundary, outer_boundary, checkpoints,
                      start_pos, start_heading, track_name
                      ) = load_track(track_idx, renderer)
+                    car = cars[0]
+                    static_s = _reset_race_state(world, track, cars, static_control_car)
                     prev_s = 0.0
                     lap_start_time = time.time()
                     current_lap_time = 0.0
@@ -178,19 +227,34 @@ def main():
 
         # --- Input ---
         keys = pygame.key.get_pressed()
-        handle_input(keys, car)
+        handle_input(keys, cars[0])
 
-        # --- Physics ---
-        car.update()
+        for i in range(1, len(cars)):
+            cars[i].set_controls(0.0, 0.0)
+
+        for c in cars:
+            c.update()
+
+        if static_control_car is not None:
+            static_s = (static_s + RACE.static_control_speed * SIM.time_step) % track.total_length
+            p, h, _ = track.get_pose_at_s(static_s)
+            static_control_car.body.position = (float(p[0]), float(p[1]))
+            static_control_car.body.angle = float(h)
+            t = np.array([np.cos(h), np.sin(h)]) * RACE.static_control_speed
+            static_control_car.body.linearVelocity = (float(t[0]), float(t[1]))
+            static_control_car.body.angularVelocity = 0.0
+
         world.step()
 
-        # --- Frenet ---
-        frenet = track.get_frenet_coordinates(car.position, car.angle)
+        frenet = track.get_frenet_coordinates(cars[0].position, cars[0].angle)
         s = frenet['s']
 
         # --- Sensors ---
+        ray_kwargs = {}
+        if SENSOR.detect_cars_as_obstacles:
+            ray_kwargs = {"cars": all_cars, "ego_car": cars[0]}
         ray_distances, ray_hits = raycaster.cast(
-            car.position, car.angle, inner_boundary, outer_boundary
+            cars[0].position, cars[0].angle, inner_boundary, outer_boundary, **ray_kwargs
         )
 
         # --- Lap timing ---
@@ -211,11 +275,16 @@ def main():
 
         sector_length = track.total_length / TRACK.num_sectors
         current_sector = int(s / sector_length) % TRACK.num_sectors
-        touching_wall = world.collision_handler.touching_wall
+
+        # wall-contact display should reflect ONLY the main player car
+        player_stats = world.collision_handler.get_car_stats(cars[0].car_id)
+        touching_wall = player_stats['touching_wall']
+        player_wall_hits = player_stats['wall_hit_count']
+        player_car_hits = player_stats['car_collision_count']
 
         # --- Camera ---
         if follow_camera:
-            renderer.set_camera(car.position[0], car.position[1])
+            renderer.set_camera(cars[0].position[0], cars[0].position[1])
         else:
             track_center = np.mean(track.centerline, axis=0)
             renderer.set_camera(track_center[0], track_center[1])
@@ -224,24 +293,25 @@ def main():
         renderer.clear()
         renderer.draw_track(track)
         renderer.draw_checkpoints(checkpoints)
-        renderer.draw_car(car, touching_wall=touching_wall)
-        renderer.draw_frenet_debug(car, frenet)
+        renderer.draw_cars(all_cars, collision_handler=world.collision_handler)
+        renderer.draw_frenet_debug(cars[0], frenet)
 
         if show_sensors:
-            renderer.draw_rays(car.position, ray_distances, ray_hits,
+            renderer.draw_rays(cars[0].position, ray_distances, ray_hits,
                                raycaster.max_distance, raycaster.is_mirror)
             renderer.draw_sensor_panel(ray_distances, raycaster.max_distance,
                                        raycaster.is_mirror)
 
         renderer.draw_track_name(track_name, track.total_length)
-        renderer.draw_hud(car, frenet)
+        renderer.draw_hud(cars[0], frenet)
         renderer.draw_lap_timer({
             'current_time': current_lap_time,
             'best_time': best_lap_time,
             'lap_count': lap_count,
-            'wall_hits': world.collision_handler.total_wall_hits,
-            'touching_wall': touching_wall,
+            'wall_hits': player_wall_hits,   # player-only
+            'touching_wall': touching_wall,  # player-only
             'current_sector': current_sector,
+            'car_hits': player_car_hits,     # player-only
         })
 
         renderer.update()
@@ -252,7 +322,8 @@ def main():
     print("\nSimulation ended.")
     if best_lap_time < float('inf'):
         print(f"Best lap time: {best_lap_time:.2f}s")
-    print(f"Total wall hits: {world.collision_handler.total_wall_hits}")
+    final_player_stats = world.collision_handler.get_car_stats(cars[0].car_id)
+    print(f"Total wall hits (player): {final_player_stats['wall_hit_count']}")
 
 
 if __name__ == "__main__":
