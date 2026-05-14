@@ -18,7 +18,8 @@ class Car:
     Later: Will have 4 tires with proper friction model
     """
     
-    def __init__(self, world, position=(0, 0), angle=0):
+    def __init__(self, world, position=(0, 0), angle=0, car_id=0,
+                 is_main_player=False, is_static_control=False):
         """
         Create a car in the physics world.
         
@@ -46,12 +47,30 @@ class Car:
         )
         
         # Tag body for collision identification
-        self.body.userData = {'type': 'car'}
-        
+        self.car_id = int(car_id)
+        self.is_main_player = bool(is_main_player)
+        self.is_static_control = bool(is_static_control)
+
+        self.body.userData = {
+            'type': 'car',
+            'car_id': self.car_id,
+            'is_static_control': self.is_static_control
+        }
+
+        # Collision state
+        self.collision = {
+            'touching_wall': False,
+            'touching_car': False,
+            'wall_hit_count': 0,
+            'car_collision_count': 0,
+            'wall_hit_speed': 0.0,
+            'car_collision_speed': 0.0,
+        }
+
         # Control state
         self.throttle = 0.0    # -1 (reverse) to 1 (forward)
         self.steering = 0.0   # -1 (left) to 1 (right)
-        
+
     @property
     def position(self):
         """Get car center position as numpy array"""
@@ -151,7 +170,7 @@ class Car:
                 self.body.worldCenter,
                 True
             )
-    
+
     def set_controls(self, throttle, steering):
         """
         Set control inputs.
@@ -184,4 +203,3 @@ if __name__ == "__main__":
     print(f"After 1 second of full throttle:")
     print(f"  Position: {car.position}")
     print(f"  Speed: {car.speed:.2f} m/s")
-

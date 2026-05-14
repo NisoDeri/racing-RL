@@ -44,7 +44,7 @@ class Track:
         # Boundary cache (computed lazily by get_boundary_points)
         self._cached_inner = None
         self._cached_outer = None
-        
+
         # Precompute segment data for efficiency
         self._compute_segments()
         
@@ -252,10 +252,10 @@ class Track:
     def is_inside_track(self, position: np.ndarray) -> bool:
         """
         Check if a position is within track boundaries.
-        
+
         Args:
             position: (x, y) position to check
-            
+
         Returns:
             True if inside track, False if outside
         """
@@ -299,25 +299,25 @@ class Track:
         """
         from shapely.geometry import Polygon, MultiPolygon
         from shapely.validation import make_valid
-        
+
         poly = Polygon(self.centerline)
         if not poly.is_valid:
             poly = make_valid(poly)
-        
+
         outer_poly = poly.buffer(self.half_width, resolution=8, join_style=1)
         inner_poly = poly.buffer(-self.half_width, resolution=8, join_style=1)
-        
+
         if inner_poly.is_empty:
             raise ValueError("Inner buffer empty — half_width exceeds min turn radius everywhere")
-        
+
         if isinstance(inner_poly, MultiPolygon):
             inner_poly = max(inner_poly.geoms, key=lambda g: g.area)
         if isinstance(outer_poly, MultiPolygon):
             outer_poly = max(outer_poly.geoms, key=lambda g: g.area)
-        
+
         outer = np.array(outer_poly.exterior.coords[:-1])
         inner = np.array(inner_poly.exterior.coords[:-1])
-        
+
         # Align starting points: Shapely picks arbitrary start positions
         # for each ring. If they differ, the rendering polygon
         # (outer + inner[::-1]) gets a visible diagonal seam.
@@ -326,7 +326,7 @@ class Track:
         best = np.argmin(dists)
         if best != 0:
             inner = np.roll(inner, -best, axis=0)
-        
+
         return inner, outer
     
     def _compute_boundary_naive(self) -> Tuple[np.ndarray, np.ndarray]:
@@ -365,7 +365,7 @@ class Track:
         inner, outer = self.get_boundary_points()
         n_inner = len(inner)
         n_outer = len(outer)
-        
+
         # --- Inner wall ---
         inner_wall = world.create_static_body()
         inner_wall.userData = {'type': 'wall', 'side': 'inner'}
@@ -379,7 +379,7 @@ class Track:
                 friction=TRACK.wall_friction,
                 restitution=TRACK.wall_restitution,
             )
-        
+
         # --- Outer wall ---
         outer_wall = world.create_static_body()
         outer_wall.userData = {'type': 'wall', 'side': 'outer'}
@@ -393,7 +393,7 @@ class Track:
                 friction=TRACK.wall_friction,
                 restitution=TRACK.wall_restitution,
             )
-        
+
         self.wall_bodies = [inner_wall, outer_wall]
         print(f"  Track walls created: {n_inner} inner + {n_outer} outer = {n_inner + n_outer} edges")
         return inner_wall, outer_wall
@@ -546,6 +546,19 @@ class Track:
         y = radius * np.sin(angles)
         return Track(np.column_stack([x, y]), width=track_width)
 
+    def get_pose_at_s(self, s: float):
+        """Return (position, heading, segment_idx) on centerline at arc-length s."""
+        s_wrapped = s % self.total_length
+        seg_idx = np.searchsorted(self.cumulative_length[1:], s_wrapped)
+        seg_idx = min(seg_idx, len(self.centerline) - 1)
+        s_in_seg = s_wrapped - self.cumulative_length[seg_idx]
+        t = s_in_seg / (self.segment_lengths[seg_idx] + 1e-10)
+        t = np.clip(t, 0.0, 1.0)
+        next_idx = (seg_idx + 1) % len(self.centerline)
+        pos = (1 - t) * self.centerline[seg_idx] + t * self.centerline[next_idx]
+        heading = np.arctan2(self.tangents[seg_idx, 1], self.tangents[seg_idx, 0])
+        return pos, heading, seg_idx
+
 
 # Quick test
 if __name__ == "__main__":
@@ -567,4 +580,3 @@ if __name__ == "__main__":
     # Test look-ahead curvature
     curvatures = track.get_lookahead_curvature(frenet['s'])
     print(f"\nLook-ahead curvatures: {curvatures}")
-
