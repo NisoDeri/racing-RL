@@ -8,13 +8,19 @@ All tests are headless (render_mode=None) — no display required.
 """
 import sys
 import os
+from dataclasses import replace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import numpy as np
 import pytest
 
-from src.env.racing_env import RacingEnv, _SPEED_NORM, _LAT_VEL_NORM
+from src.env.racing_env import (
+    REWARD_PROFILES,
+    RacingEnv,
+    _LAT_VEL_NORM,
+    _SPEED_NORM,
+)
 from src.track.track import Track
 
 
@@ -258,3 +264,88 @@ def test_gymnasium_check_env():
     e = RacingEnv(render_mode=None, track_creator=_sprint_track, max_episode_steps=200)
     check_env(e, warn=True, skip_render_check=True)
     e.close()
+
+
+# ============================================================
+# Phase 3 reward-shaping regression tests
+# ============================================================
+
+def test_v2_idle_step_has_time_penalty(env):
+    _, reward, _, _, info = env.step(np.array([0.0, 0.0], dtype=np.float32))
+    assert info['reward_profile'] == 'v2'
+    assert info['reward_terms']['time'] == pytest.approx(-0.001)
+    assert reward == pytest.approx(sum(info['reward_terms'].values()))
+
+
+def test_v2_does_not_reward_reverse_speed():
+    v1 = RacingEnv(render_mode=None, track_creator=_sprint_track, reward_profile='v1')
+    v2 = RacingEnv(render_mode=None, track_creator=_sprint_track, reward_profile='v2')
+    v1.reset(seed=0)
+    v2.reset(seed=0)
+
+    for candidate in (v1, v2):
+        candidate.car.body.linearVelocity = tuple(-20.0 * candidate.car.forward_vector)
+
+    frenet = {'e_y': 0.0, 'e_psi': 0.0}
+    common = dict(
+        frenet=frenet,
+        on_track=True,
+        ds=-0.2,
+        steering=0.0,
+        prev_steering=0.0,
+        new_wall_hits=0,
+        touching_wall=False,
+        backwards_terminated=False,
+    )
+    _, v1_terms = v1._compute_reward(**common)
+    _, v2_terms = v2._compute_reward(**common)
+
+    assert v1_terms['speed'] == pytest.approx(0.2)
+    assert v2_terms['speed'] == pytest.approx(0.0)
+    v1.close()
+    v2.close()
+
+
+def test_v2_wall_scraping_has_no_progress_or_speed_reward(env):
+    env.car.body.linearVelocity = tuple(20.0 * env.car.forward_vector)
+    _, terms = env._compute_reward(
+        frenet={'e_y': 0.0, 'e_psi': 0.0},
+        on_track=True,
+        ds=0.3,
+        steering=0.0,
+        prev_steering=0.0,
+        new_wall_hits=0,
+        touching_wall=True,
+        backwards_terminated=False,
+    )
+    assert terms['progress'] == pytest.approx(0.0)
+    assert terms['speed'] == pytest.approx(0.0)
+    assert terms['wall_contact'] == pytest.approx(-0.25)
+
+
+def test_sustained_backwards_progress_terminates():
+    config = replace(REWARD_PROFILES['v2'], max_backwards_steps=3)
+    e = RacingEnv(
+        render_mode=None,
+        track_creator=_sprint_track,
+        max_episode_steps=100,
+        reward_config=config,
+    )
+    e.reset(seed=0)
+    e._compute_progress_delta = lambda current_s: -1.0
+
+    for _ in range(3):
+        _, _, terminated, truncated, info = e.step(
+            np.array([0.0, 0.0], dtype=np.float32)
+        )
+
+    assert terminated
+    assert not truncated
+    assert info['termination_reason'] == 'driving_backwards'
+    assert info['reward_terms']['backwards'] == pytest.approx(-25.0)
+    e.close()
+
+
+def test_unknown_reward_profile_is_rejected():
+    with pytest.raises(ValueError, match='Unknown reward_profile'):
+        RacingEnv(reward_profile='not-a-profile')

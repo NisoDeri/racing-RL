@@ -9,17 +9,14 @@ Phase 1 RL contract:
   Action:
     [throttle, steering], both in [-1, 1]
 
-  Reward:
-    + positive forward progress along the centerline
-    + small speed bonus
-    - lateral deviation from the centerline
-    - heading error
-    - steering jitter
-    - wall hits
-    - off-track termination penalty
+  Reward profiles:
+    v1 preserves the Phase 2 baseline.
+    v2 adds forward-only speed, time and wall-contact costs, and backwards
+    driving termination for the Phase 3 reward-shaping experiment.
 """
 import os
 import sys
+from dataclasses import dataclass
 
 import gymnasium as gym
 from gymnasium import spaces
@@ -36,6 +33,45 @@ from src.rendering.renderer import Renderer
 from src.sensors.sensor import RayCaster
 
 
+_SPEED_NORM = 95.0
+_LAT_VEL_NORM = 50.0
+
+
+@dataclass(frozen=True)
+class RewardConfig:
+    """Weights and safeguards for one reward-shaping experiment."""
+
+    progress_weight: float = 1.0
+    speed_weight: float = 0.01
+    lateral_weight: float = 0.1
+    heading_weight: float = 0.05
+    steering_smoothness_weight: float = 0.5
+    wall_hit_penalty: float = 10.0
+    off_track_penalty: float = 50.0
+    time_penalty: float = 0.0
+    wall_contact_penalty: float = 0.0
+    backwards_terminal_penalty: float = 0.0
+    forward_speed_only: bool = False
+    reward_while_touching_wall: bool = True
+    max_backwards_steps: int | None = None
+    backwards_progress_threshold: float = -0.01
+
+
+REWARD_PROFILES = {
+    # Exact Phase 1/2 reward, kept for reproducible before/after experiments.
+    "v1": RewardConfig(),
+    # Phase 3 fixes for reversing, wall scraping, and camping.
+    "v2": RewardConfig(
+        time_penalty=0.001,
+        wall_contact_penalty=0.25,
+        backwards_terminal_penalty=25.0,
+        forward_speed_only=True,
+        reward_while_touching_wall=False,
+        max_backwards_steps=120,
+    ),
+}
+
+
 class RacingEnv(gym.Env):
     """
     Top-down racing environment for reinforcement learning.
@@ -46,7 +82,14 @@ class RacingEnv(gym.Env):
 
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 60}
 
-    def __init__(self, render_mode=None, track_creator=None, max_episode_steps=6000):
+    def __init__(
+        self,
+        render_mode=None,
+        track_creator=None,
+        max_episode_steps=6000,
+        reward_profile=None,
+        reward_config=None,
+    ):
         """
         Args:
             render_mode: "human" for Pygame window, "rgb_array" for pixel array,
@@ -55,8 +98,29 @@ class RacingEnv(gym.Env):
                 None, uses Track.create_complex_track().
             max_episode_steps: Max steps before truncation, about 100 seconds
                 at 60 FPS.
+            reward_profile: Named reward configuration ("v1" or "v2"). Defaults
+                to the Phase 3 "v2" profile.
+            reward_config: Optional RewardConfig override for experiments/tests.
         """
         super().__init__()
+
+        if reward_config is not None and reward_profile is not None:
+            raise ValueError("Pass either reward_profile or reward_config, not both")
+        if reward_config is not None:
+            if not isinstance(reward_config, RewardConfig):
+                raise TypeError("reward_config must be a RewardConfig")
+            self.reward_profile = "custom"
+            self.reward_config = reward_config
+        else:
+            reward_profile = reward_profile or "v2"
+            try:
+                self.reward_config = REWARD_PROFILES[reward_profile]
+            except KeyError as exc:
+                choices = ", ".join(sorted(REWARD_PROFILES))
+                raise ValueError(
+                    f"Unknown reward_profile {reward_profile!r}; choose from {choices}"
+                ) from exc
+            self.reward_profile = reward_profile
 
         self.render_mode = render_mode
         self.track_creator = track_creator
@@ -76,7 +140,9 @@ class RacingEnv(gym.Env):
         high = np.ones(self.obs_dim, dtype=np.float32)
         speed_idx = self.raycaster.num_rays
         lateral_idx = speed_idx + 1
-        low[lateral_idx:] = -1.0
+        low[lateral_idx] = -2.0
+        high[lateral_idx] = 2.0
+        low[lateral_idx + 1:] = -1.0
         high[speed_idx] = 2.0
 
         self.observation_space = spaces.Box(low=low, high=high, dtype=np.float32)
@@ -100,8 +166,12 @@ class RacingEnv(gym.Env):
         self.laps_completed = 0
         self.last_throttle = 0.0
         self.last_steering = 0.0
-        self.prev_wall_hit_count = 0
+        self.prev_steering = 0.0
+        self.prev_wall_hits = 0
         self.stuck_wall_steps = 0
+        self.backwards_steps = 0
+        self.total_abs_steering_change = 0.0
+        self.termination_reason = None
 
         self.last_ray_distances = None
         self.last_ray_hits = None
@@ -141,8 +211,12 @@ class RacingEnv(gym.Env):
         self.laps_completed = 0
         self.last_throttle = 0.0
         self.last_steering = 0.0
-        self.prev_wall_hit_count = 0
+        self.prev_steering = 0.0
+        self.prev_wall_hits = 0
         self.stuck_wall_steps = 0
+        self.backwards_steps = 0
+        self.total_abs_steering_change = 0.0
+        self.termination_reason = None
         self.last_reward_terms = {}
         self.last_wall_hit_this_step = False
 
@@ -165,9 +239,10 @@ class RacingEnv(gym.Env):
         Returns:
             observation, reward, terminated, truncated, info.
         """
-        prev_steering = self.last_steering
+        prev_steering = self.prev_steering
         throttle = float(np.clip(action[0], -1.0, 1.0))
         steering = float(np.clip(action[1], -1.0, 1.0))
+        self.total_abs_steering_change += abs(steering - prev_steering)
         self.car.set_controls(throttle, steering)
 
         self.car.update()
@@ -185,9 +260,19 @@ class RacingEnv(gym.Env):
 
         wall_stats = self.world.collision_handler.get_car_stats(self.car.car_id)
         wall_hits = int(wall_stats['wall_hit_count'])
-        new_wall_hits = max(0, wall_hits - self.prev_wall_hit_count)
-        self.prev_wall_hit_count = wall_hits
+        new_wall_hits = max(0, wall_hits - self.prev_wall_hits)
+        self.prev_wall_hits = wall_hits
         self.last_wall_hit_this_step = new_wall_hits > 0
+
+        if ds < self.reward_config.backwards_progress_threshold:
+            self.backwards_steps += 1
+        else:
+            self.backwards_steps = 0
+
+        backwards_terminated = (
+            self.reward_config.max_backwards_steps is not None
+            and self.backwards_steps >= self.reward_config.max_backwards_steps
+        )
 
         reward, reward_terms = self._compute_reward(
             frenet=frenet,
@@ -196,6 +281,8 @@ class RacingEnv(gym.Env):
             steering=steering,
             prev_steering=prev_steering,
             new_wall_hits=new_wall_hits,
+            touching_wall=bool(wall_stats['touching_wall']),
+            backwards_terminated=backwards_terminated,
         )
         self.last_reward_terms = reward_terms
 
@@ -204,6 +291,7 @@ class RacingEnv(gym.Env):
 
         if not on_track:
             terminated = True
+            self.termination_reason = "off_track"
 
         if wall_stats['touching_wall'] and max(ds, 0.0) < 0.01:
             self.stuck_wall_steps += 1
@@ -212,12 +300,20 @@ class RacingEnv(gym.Env):
 
         if self.stuck_wall_steps >= 30:
             terminated = True
+            self.termination_reason = "stuck_wall"
+
+        if backwards_terminated:
+            terminated = True
+            self.termination_reason = "driving_backwards"
 
         if self.steps >= self.max_episode_steps:
             truncated = True
+            if not terminated:
+                self.termination_reason = "max_steps"
 
         self.last_throttle = throttle
         self.last_steering = steering
+        self.prev_steering = steering
 
         obs = self._get_observation()
         info = self._get_info()
@@ -254,12 +350,12 @@ class RacingEnv(gym.Env):
         self.last_ray_hits = hit_points
 
         rays = self.raycaster.get_normalized(distances)
-        lateral_velocity = np.clip(self.car.get_lateral_velocity() / 50.0, -1.0, 1.0)
+        lateral_velocity = np.clip(self.car.get_lateral_velocity() / _LAT_VEL_NORM, -2.0, 2.0)
 
         return np.array(
             [
                 *rays,
-                self.car.speed / 95.0,
+                self.car.speed / _SPEED_NORM,
                 lateral_velocity,
                 self.last_throttle,
                 self.last_steering,
@@ -267,14 +363,46 @@ class RacingEnv(gym.Env):
             dtype=np.float32,
         )
 
-    def _compute_reward(self, frenet, on_track, ds, steering, prev_steering, new_wall_hits):
-        progress_reward = max(ds, 0.0) if on_track else 0.0
-        speed_bonus = 0.01 * self.car.speed if on_track else 0.0
-        lateral_penalty = -0.1 * abs(frenet['e_y']) / self.track.half_width
-        heading_penalty = -0.05 * abs(frenet['e_psi']) / np.pi
-        steering_penalty = -0.5 * abs(steering - prev_steering)
-        wall_penalty = -10.0 * new_wall_hits
-        off_track_penalty = -50.0 if not on_track else 0.0
+    def _compute_reward(
+        self,
+        frenet,
+        on_track,
+        ds,
+        steering,
+        prev_steering,
+        new_wall_hits,
+        touching_wall,
+        backwards_terminated,
+    ):
+        config = self.reward_config
+        clean_driving = on_track and (
+            config.reward_while_touching_wall or not touching_wall
+        )
+        progress_reward = (
+            config.progress_weight * max(ds, 0.0) if clean_driving else 0.0
+        )
+        speed = (
+            max(self.car.get_forward_velocity(), 0.0)
+            if config.forward_speed_only
+            else self.car.speed
+        )
+        speed_bonus = config.speed_weight * speed if clean_driving else 0.0
+        lateral_penalty = (
+            -config.lateral_weight * abs(frenet['e_y']) / self.track.half_width
+        )
+        heading_penalty = -config.heading_weight * abs(frenet['e_psi']) / np.pi
+        steering_penalty = (
+            -config.steering_smoothness_weight * abs(steering - prev_steering)
+        )
+        wall_penalty = -config.wall_hit_penalty * new_wall_hits
+        wall_contact_penalty = (
+            -config.wall_contact_penalty if touching_wall else 0.0
+        )
+        time_penalty = -config.time_penalty
+        off_track_penalty = -config.off_track_penalty if not on_track else 0.0
+        backwards_penalty = (
+            -config.backwards_terminal_penalty if backwards_terminated else 0.0
+        )
 
         reward_terms = {
             'progress': float(progress_reward),
@@ -283,7 +411,10 @@ class RacingEnv(gym.Env):
             'heading': float(heading_penalty),
             'steering_smoothness': float(steering_penalty),
             'wall_hit': float(wall_penalty),
+            'wall_contact': float(wall_contact_penalty),
+            'time': float(time_penalty),
             'off_track': float(off_track_penalty),
+            'backwards': float(backwards_penalty),
         }
 
         return float(sum(reward_terms.values())), reward_terms
@@ -300,6 +431,7 @@ class RacingEnv(gym.Env):
 
         return {
             'speed': float(self.car.speed),
+            'forward_velocity': float(self.car.get_forward_velocity()),
             'speed_kmh': float(self.car.speed * 3.6),
             's': float(frenet['s']),
             'e_y': float(frenet['e_y']),
@@ -314,6 +446,13 @@ class RacingEnv(gym.Env):
             'lateral_velocity': float(self.car.get_lateral_velocity()),
             'last_throttle': float(self.last_throttle),
             'last_steering': float(self.last_steering),
+            'prev_steering': float(self.prev_steering),
+            'backwards_steps': int(self.backwards_steps),
+            'mean_abs_steering_change': float(
+                self.total_abs_steering_change / max(self.steps, 1)
+            ),
+            'termination_reason': self.termination_reason,
+            'reward_profile': self.reward_profile,
             'reward_terms': self.last_reward_terms,
         }
 

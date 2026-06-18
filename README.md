@@ -11,6 +11,8 @@ University project — the goal is to train RL agents (PPO, SAC) that learn to d
 ```
 f1/
 ├── main.py                  # Interactive demo (keyboard-controlled driving)
+├── train.py                 # PPO baseline and reward-ablation runner
+├── evaluate.py              # Headless policy metrics and JSON output
 ├── config.py                # All tunable parameters (physics, car, track, sensors, rendering)
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
@@ -39,19 +41,20 @@ f1/
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - pip
 
 ### Installation
 
 ```bash
-pip install -r requirements.txt
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
 ### Interactive Demo
 
 ```bash
-python main.py
+.venv/bin/python main.py
 ```
 
 **Controls:**
@@ -86,6 +89,26 @@ for _ in range(1000):
 
 env.close()
 ```
+
+### Training and Evaluation
+
+`v1` reproduces the Phase 2 reward. `v2` is the Phase 3 default with reward-hacking
+protections. Use distinct run names so ablation outputs never overwrite each other.
+
+```bash
+# Phase 2 control run
+.venv/bin/python train.py --reward-profile v1 --seed 42 --run-name ppo_sprint_v1_seed42
+
+# Phase 3 shaped-reward run
+.venv/bin/python train.py --reward-profile v2 --seed 42 --run-name ppo_sprint_v2_seed42
+
+# Headless metrics; repeat with v1/v2 models for the before/after table
+.venv/bin/python evaluate.py models/ppo_sprint_v2_seed42_final.zip \
+  --reward-profile v2 --episodes 100 --output results/phase3_v2_seed42.json
+```
+
+The committed model and TensorBoard files use Git LFS. Run `git lfs pull` before
+evaluating those artifacts.
 
 ---
 
@@ -133,7 +156,8 @@ This representation is **track-agnostic** — the same observation semantics app
 
 ### Sensor Systems
 
-Two complementary observation channels:
+Two observation implementations are available. The current raycast-only policy uses
+the first; Frenet data is kept internal for reward shaping and optional later ablations.
 
 #### 1. RayCaster (LiDAR-like)
 
@@ -148,7 +172,7 @@ Each ray returns the distance to the nearest wall. The resulting 30-dimensional 
 
 Computes the Frenet frame observation plus **lookahead curvature** — the curvature values at 10 points sampled every 5m ahead of the car. This gives the agent predictive knowledge of upcoming turns (analogous to a driver who has studied the track map).
 
-Combined, the agent has both **reactive perception** (rays: "where are the walls right now?") and **predictive knowledge** (curvature lookahead: "what turns are coming?").
+The baseline deliberately does not expose Frenet features to the policy.
 
 ### Collision Detection
 
@@ -167,17 +191,18 @@ The environment follows the standard **Gymnasium API** (`reset`, `step`, `render
 
 ### Observation Space
 
-14-dimensional continuous vector (`Box`):
+34-dimensional continuous vector (`Box`):
 
 | Index | Feature | Normalization |
 |-------|---------|---------------|
-| 0 | Speed | ÷ 95 m/s (≈340 km/h theoretical max) |
-| 1 | Lateral error (eᵧ) | ÷ track half-width (±1 = at edge) |
-| 2 | Heading error (eᵩ) | ÷ π (full range = ±1) |
-| 3 | Curvature (κ) | × 100 (raw values are small) |
-| 4–13 | Lookahead curvatures (10 pts) | × 100 |
+| 0–29 | Raycast distances | ÷ 100m maximum range, clipped to `[0, 1]` |
+| 30 | Speed | ÷ 95 m/s; declared range `[0, 2]` |
+| 31 | Lateral velocity | ÷ 50 m/s, clipped to `[-2, 2]` |
+| 32 | Previous throttle | `[-1, 1]` |
+| 33 | Previous steering | `[-1, 1]` |
 
-All values are scaled to approximately [-1, 1] for stable neural network training.
+Training stacks four consecutive observations with `VecFrameStack`, producing a
+136-dimensional policy input that can encode motion over time.
 
 ### Action Space
 
@@ -190,19 +215,29 @@ All values are scaled to approximately [-1, 1] for stable neural network trainin
 
 ### Reward Function
 
-The reward is designed to encourage fast, clean driving:
+Two named profiles make the reward-shaping ablation reproducible. `v1` is the Phase 2
+baseline. `v2` is the Phase 3 default and retains the same core terms while closing
+three known exploits:
 
 | Component | Formula | Purpose |
 |-----------|---------|---------|
 | **Progress** | `+1.0 × ds` | Forward movement along the track (dominant signal) |
 | **Lateral penalty** | `−0.1 × \|eᵧ\| / half_width` | Stay near the centerline |
 | **Heading penalty** | `−0.05 × \|eᵩ\| / π` | Face the track direction |
-| **Speed bonus** | `+0.01 × speed` | Go faster |
-| **Off-track penalty** | `−10.0` (+ episode termination) | Don't leave the track |
+| **Speed bonus** | `+0.01 × max(forward_speed, 0)` | Reward forward driving, not reversing |
+| **Steering smoothness** | `−0.5 × \|Δsteering\|` | Avoid control jitter |
+| **Wall hit** | `−10.0` per new hit | Avoid collisions |
+| **Wall contact (v2)** | `−0.25` per touching step | Make sustained wall scraping costly |
+| **Time (v2)** | `−0.001` per step | Make camping costly |
+| **Off-track** | `−50.0` (+ termination) | Stay on the circuit |
+
+In `v2`, progress and speed bonuses are zero while touching a wall. After 120
+consecutive backwards-progress steps, the episode terminates with a `−25` penalty.
 
 ### Episode Termination
 
-- **Terminated**: car leaves the track boundaries
+- **Terminated**: off-track, stuck against a wall for 30 steps, or sustained reverse
+  progress for 120 steps (`v2`)
 - **Truncated**: episode exceeds `max_episode_steps` (default 6000 ≈ 100 seconds at 60 fps)
 
 ### Info Dict
@@ -220,6 +255,11 @@ Each step returns additional metrics:
     'on_track': bool,        # within track boundaries
     'laps': int,             # completed laps
     'total_progress': float, # cumulative distance traveled (meters)
+    'wall_hits': int,
+    'mean_abs_steering_change': float,
+    'termination_reason': str | None,
+    'reward_profile': str,
+    'reward_terms': dict,
 }
 ```
 

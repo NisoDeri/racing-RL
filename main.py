@@ -68,7 +68,6 @@ def load_track(track_idx, renderer):
 
     start_pos = track.centerline[0]
     start_heading = np.arctan2(track.tangents[0, 1], track.tangents[0, 0])
-    car = Car(world, position=start_pos, angle=start_heading)
 
     track_span = np.max(track.centerline, axis=0) - np.min(track.centerline, axis=0)
     max_span = max(track_span)

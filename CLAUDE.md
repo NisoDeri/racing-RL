@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO/SAC agents to race autonomously using only on-board sensors. The simulation infrastructure is complete; Phase 1 (RL contract) is complete; active work is Phase 2 (PPO baseline training).
+A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO/SAC agents to race autonomously using only on-board sensors. Phases 1–2 are complete; active work is Phase 3 reward shaping and evaluation.
 
 ## Commands
 
@@ -20,11 +20,14 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 # Watch a random agent in real time (sanity-check the env)
 .venv/bin/python watch_env.py
 
-# Train PPO baseline (outputs to logs/ and models/)
-# Hardware auto-detected: SubprocVecEnv for CPUs, MPS/CUDA for neural net
-.venv/bin/python train.py
-# Override hardware:  N_ENVS=4 DEVICE=cpu .venv/bin/python train.py
+# Train Phase 2 control or Phase 3 reward variant
+.venv/bin/python train.py --reward-profile v1 --run-name ppo_sprint_v1_seed42
+.venv/bin/python train.py --reward-profile v2 --run-name ppo_sprint_v2_seed42
 tensorboard --logdir logs/
+
+# Headless evaluation to JSON
+.venv/bin/python evaluate.py models/ppo_sprint_v2_seed42_final.zip --episodes 100 \
+  --output results/phase3_v2_seed42.json
 
 # Watch a trained model drive
 .venv/bin/python watch_trained.py                                    # loads models/best_model.zip
@@ -47,7 +50,9 @@ The system is split into five modules under `src/`, all wired together in `main.
 
 **`src/rendering/`** — `Renderer` draws track, cars, HUD, sensor rays, lap timer, and Frenet debug overlays via Pygame. Stateless except for camera position and zoom.
 
-**`src/env/racing_env.py`** — `RacingEnv` is the Gymnasium wrapper (single-car). Observation is a **34-dim raycast-only vector**: 30 normalized ray distances `[0,1]` + normalized speed `[0,2]` + normalized lateral velocity `[-2,2]` + last throttle + last steering `[-1,1]`. Action is `[throttle, steering]` ∈ [-1,1]². Episode terminates on off-track, 30+ steps stuck against a wall, or after 6000 steps.
+**`src/env/racing_env.py`** — `RacingEnv` is the Gymnasium wrapper (single-car). Observation is a **34-dim raycast-only vector**: 30 normalized ray distances `[0,1]` + normalized speed `[0,2]` + normalized lateral velocity `[-2,2]` + last throttle + last steering `[-1,1]`. Action is `[throttle, steering]` ∈ [-1,1]². The Phase 3 `v2` profile terminates on off-track, 30+ stuck-wall steps, or 120 backwards-progress steps; all profiles truncate after 6000 steps.
+
+**`train.py` / `evaluate.py`** — PPO experiment runner and headless evaluator. Both accept `--reward-profile v1|v2`; training also exposes seeds and rollout controls. Evaluation reports lap success, progress, wall hits, smoothness, Frenet error, and termination reasons.
 
 **`main.py`** — Multi-car interactive demo. Spawns `RACE.num_players` player cars plus an optional kinematic centerline-following control car. Useful as reference for setting up the full stack manually.
 
@@ -63,7 +68,7 @@ All physics, sensor, and render parameters live in `config.py` as global datacla
 
 **Observation is raycast-only; Frenet is reward-only.** The 34-dim obs uses only what an on-board sensor would see. Frenet coordinates (`s`, `e_y`, `e_psi`) are computed internally each step for reward shaping but are NOT in the observation — Frenet still lives in `src/track/track.py` for this purpose. Frenet computed via closest-point projection onto the centerline; lap wraparound uses a ±half-track-length guard on `ds`.
 
-**Reward function (v1).** `r_t = ds + 0.01·speed − 0.1·|e_y|/half_width − 0.05·|e_psi|/π − 0.5·|Δsteering| − 10·wall_hits − 50·off_track`. The `ds` term is clipped to `max(0, ds)` to prevent backwards driving.
+**Reward profiles.** `v1` exactly retains the Phase 2 reward for control runs. The default `v2` uses forward velocity for the speed bonus, withholds progress/speed reward during wall contact, adds `−0.25` per wall-contact step and `−0.001` per time step, and terminates sustained reverse driving with `−25`.
 
 **Collision tracking is per-car.** `CollisionHandler.get_car_stats(car_id)` returns counts for a specific car. The `ignore_car_collision_count_until_step` gate prevents Box2D's initial contact cascade at spawn from inflating hit counts.
 
@@ -75,5 +80,6 @@ All physics, sensor, and render parameters live in `config.py` as global datacla
 
 See `NEXT_PHASE.md` for the full 10-phase plan. Current status:
 - **Phase 1** (RL contract — obs/action/reward) ✓ complete
-- **Phase 2** (PPO baseline on Sprint Circuit) — `train.py` is ready; run it
-- **Phases 3–10** — reward iteration, domain randomization, curriculum, self-play, SAC comparison
+- **Phase 2** (PPO baseline on Sprint Circuit) ✓ complete; artifacts use Git LFS
+- **Phase 3** (reward iteration + reproducible evaluation) — active
+- **Phases 4–10** — domain randomization, curriculum, self-play, SAC comparison, report
