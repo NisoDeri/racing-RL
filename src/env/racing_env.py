@@ -86,6 +86,10 @@ class RacingEnv(gym.Env):
         self,
         render_mode=None,
         track_creator=None,
+        track_generator=None,
+        randomize_start=False,
+        start_lateral_jitter=0.1,
+        start_heading_jitter=np.radians(5.0),
         max_episode_steps=6000,
         reward_profile=None,
         reward_config=None,
@@ -96,6 +100,11 @@ class RacingEnv(gym.Env):
                 None for headless.
             track_creator: Optional callable that returns a Track instance. If
                 None, uses Track.create_complex_track().
+            track_generator: Optional callable accepting the seeded Gymnasium RNG
+                and returning a new Track. Used for per-episode randomization.
+            randomize_start: Randomize longitudinal, lateral, and heading start pose.
+            start_lateral_jitter: Maximum lateral offset as a fraction of half-width.
+            start_heading_jitter: Maximum absolute heading offset in radians.
             max_episode_steps: Max steps before truncation, about 100 seconds
                 at 60 FPS.
             reward_profile: Named reward configuration ("v1" or "v2"). Defaults
@@ -103,6 +112,13 @@ class RacingEnv(gym.Env):
             reward_config: Optional RewardConfig override for experiments/tests.
         """
         super().__init__()
+
+        if track_creator is not None and track_generator is not None:
+            raise ValueError("Pass either track_creator or track_generator, not both")
+        if not 0.0 <= start_lateral_jitter < 1.0:
+            raise ValueError("start_lateral_jitter must be in [0, 1)")
+        if start_heading_jitter < 0.0:
+            raise ValueError("start_heading_jitter must be non-negative")
 
         if reward_config is not None and reward_profile is not None:
             raise ValueError("Pass either reward_profile or reward_config, not both")
@@ -124,6 +140,10 @@ class RacingEnv(gym.Env):
 
         self.render_mode = render_mode
         self.track_creator = track_creator
+        self.track_generator = track_generator
+        self.randomize_start = randomize_start
+        self.start_lateral_jitter = start_lateral_jitter
+        self.start_heading_jitter = start_heading_jitter
         self.max_episode_steps = max_episode_steps
 
         self.raycaster = RayCaster(
@@ -157,6 +177,7 @@ class RacingEnv(gym.Env):
         self.car = None
         self.track = None
         self.renderer = None
+        self.window_closed = False
         self.inner_boundary = None
         self.outer_boundary = None
 
@@ -190,7 +211,9 @@ class RacingEnv(gym.Env):
 
         self.world = World()
 
-        if self.track_creator:
+        if self.track_generator:
+            self.track = self.track_generator(self.np_random)
+        elif self.track_creator:
             self.track = self.track_creator()
         else:
             self.track = Track.create_complex_track(track_width=14)
@@ -201,12 +224,14 @@ class RacingEnv(gym.Env):
             RACE.startup_collision_grace_steps
         )
 
-        start_pos = self.track.centerline[0]
-        start_heading = np.arctan2(self.track.tangents[0, 1], self.track.tangents[0, 0])
+        start_s, lateral_offset, heading_offset = self._get_start_state(options)
+        start_pos, start_heading, start_segment = self.track.get_pose_at_s(start_s)
+        start_pos = start_pos + self.track.normals[start_segment] * lateral_offset
+        start_heading += heading_offset
         self.car = Car(self.world, position=start_pos, angle=start_heading)
 
         self.steps = 0
-        self.prev_s = 0.0
+        self.prev_s = start_s
         self.total_progress = 0.0
         self.laps_completed = 0
         self.last_throttle = 0.0
@@ -217,6 +242,9 @@ class RacingEnv(gym.Env):
         self.backwards_steps = 0
         self.total_abs_steering_change = 0.0
         self.termination_reason = None
+        self.episode_start_s = start_s
+        self.episode_start_lateral_offset = lateral_offset
+        self.episode_start_heading_offset = heading_offset
         self.last_reward_terms = {}
         self.last_wall_hit_this_step = False
 
@@ -228,6 +256,29 @@ class RacingEnv(gym.Env):
             self.render()
 
         return obs, info
+
+    def _get_start_state(self, options):
+        options = options or {}
+        if self.randomize_start:
+            default_s = self.np_random.uniform(0.0, self.track.total_length)
+            lateral_limit = self.start_lateral_jitter * self.track.half_width
+            default_lateral = self.np_random.uniform(-lateral_limit, lateral_limit)
+            default_heading = self.np_random.uniform(
+                -self.start_heading_jitter, self.start_heading_jitter
+            )
+        else:
+            default_s = 0.0
+            default_lateral = 0.0
+            default_heading = 0.0
+
+        start_s = float(options.get("start_s", default_s)) % self.track.total_length
+        lateral_offset = float(options.get("lateral_offset", default_lateral))
+        heading_offset = float(options.get("heading_offset", default_heading))
+        if not np.all(np.isfinite([start_s, lateral_offset, heading_offset])):
+            raise ValueError("Start pose values must be finite")
+        if abs(lateral_offset) >= self.track.half_width:
+            raise ValueError("lateral_offset must remain within the track")
+        return start_s, lateral_offset, heading_offset
 
     def step(self, action):
         """
@@ -440,6 +491,7 @@ class RacingEnv(gym.Env):
             'on_track': bool(self.track.is_inside_track(self.car.position)),
             'laps': int(self.laps_completed),
             'total_progress': float(self.total_progress),
+            'progress_fraction': float(self.total_progress / self.track.total_length),
             'wall_hits': int(wall_stats['wall_hit_count']),
             'wall_hit_this_step': bool(self.last_wall_hit_this_step),
             'ray_min_distance': ray_min_distance,
@@ -453,6 +505,13 @@ class RacingEnv(gym.Env):
             ),
             'termination_reason': self.termination_reason,
             'reward_profile': self.reward_profile,
+            'track_name': self.track.name,
+            'track_seed': self.track.generation_seed,
+            'track_length': float(self.track.total_length),
+            'track_width': float(self.track.width),
+            'start_s': float(self.episode_start_s),
+            'start_lateral_offset': float(self.episode_start_lateral_offset),
+            'start_heading_offset': float(self.episode_start_heading_offset),
             'reward_terms': self.last_reward_terms,
         }
 
@@ -460,15 +519,15 @@ class RacingEnv(gym.Env):
         """Initialize the Pygame renderer."""
         if self.renderer is None:
             self.renderer = Renderer()
-            track_span = np.max(self.track.centerline, axis=0) - np.min(
-                self.track.centerline, axis=0
-            )
-            max_span = max(track_span)
-            self.renderer.zoom = (
-                min(RENDER.screen_width, RENDER.screen_height)
-                / (max_span + 50)
-                / SIM.pixels_per_meter
-            )
+        track_span = np.max(self.track.centerline, axis=0) - np.min(
+            self.track.centerline, axis=0
+        )
+        max_span = max(track_span)
+        self.renderer.zoom = (
+            min(RENDER.screen_width, RENDER.screen_height)
+            / (max_span + 50)
+            / SIM.pixels_per_meter
+        )
 
     def render(self):
         """
@@ -477,7 +536,7 @@ class RacingEnv(gym.Env):
         For render_mode="human": displays in a Pygame window.
         For render_mode="rgb_array": returns a pixel array.
         """
-        if self.render_mode is None:
+        if self.render_mode is None or self.window_closed:
             return None
 
         if self.renderer is None:
@@ -485,6 +544,7 @@ class RacingEnv(gym.Env):
 
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
+                self.window_closed = True
                 self.close()
                 return None
 

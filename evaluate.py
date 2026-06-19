@@ -1,4 +1,4 @@
-"""Headless evaluation for Sprint Circuit reward-shaping experiments."""
+"""Headless PPO evaluation on fixed held-out racing tracks."""
 
 import argparse
 from collections import Counter
@@ -10,14 +10,10 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 
 from src.env.racing_env import REWARD_PROFILES, RacingEnv
-from src.track.track import Track
+from src.track.random_track import HELD_OUT_TRACK_IDS, create_held_out_track
 
 
 N_STACK = 4
-
-
-def _sprint_track():
-    return Track.create_sprint_track(track_width=14)
 
 
 def _resolve_model_path(value):
@@ -41,14 +37,43 @@ def _mean_std(values):
     return {"mean": float(np.mean(values)), "std": float(np.std(values))}
 
 
-def evaluate(model_path, reward_profile, episodes, seed, max_episode_steps):
-    model_path = _resolve_model_path(model_path)
-    model = PPO.load(model_path, device="cpu")
+def _summarize_results(results):
+    reasons = Counter(result["termination_reason"] for result in results)
+    return {
+        "episodes": len(results),
+        "success_rate": float(np.mean([result["success"] for result in results])),
+        "return": _mean_std([result["return"] for result in results]),
+        "steps": _mean_std([result["steps"] for result in results]),
+        "progress": _mean_std([result["progress"] for result in results]),
+        "progress_fraction": _mean_std(
+            [result["progress_fraction"] for result in results]
+        ),
+        "wall_hits": _mean_std([result["wall_hits"] for result in results]),
+        "mean_speed": _mean_std([result["mean_speed"] for result in results]),
+        "mean_abs_e_y": _mean_std([result["mean_abs_e_y"] for result in results]),
+        "mean_abs_e_psi": _mean_std(
+            [result["mean_abs_e_psi"] for result in results]
+        ),
+        "mean_abs_steering_change": _mean_std(
+            [result["mean_abs_steering_change"] for result in results]
+        ),
+        "termination_counts": dict(sorted(reasons.items())),
+    }
 
+
+def _evaluate_track(
+    model,
+    track_id,
+    reward_profile,
+    episodes,
+    seed,
+    max_episode_steps,
+):
     def make_env():
         return RacingEnv(
             render_mode=None,
-            track_creator=_sprint_track,
+            track_creator=lambda: create_held_out_track(track_id),
+            randomize_start=True,
             max_episode_steps=max_episode_steps,
             reward_profile=reward_profile,
         )
@@ -83,6 +108,7 @@ def evaluate(model_path, reward_profile, episodes, seed, max_episode_steps):
                             "laps": int(info["laps"]),
                             "success": bool(info["laps"] > 0),
                             "progress": float(info["total_progress"]),
+                            "progress_fraction": float(info["progress_fraction"]),
                             "wall_hits": int(info["wall_hits"]),
                             "mean_speed": float(np.mean(speeds)),
                             "mean_abs_e_y": float(np.mean(lateral_errors)),
@@ -91,41 +117,75 @@ def evaluate(model_path, reward_profile, episodes, seed, max_episode_steps):
                                 info["mean_abs_steering_change"]
                             ),
                             "termination_reason": info["termination_reason"],
+                            "track_name": info["track_name"],
+                            "track_seed": info["track_seed"],
+                            "track_length": info["track_length"],
+                            "track_width": info["track_width"],
+                            "start_s": info["start_s"],
+                            "start_lateral_offset": info["start_lateral_offset"],
+                            "start_heading_offset": info["start_heading_offset"],
                         }
                     )
                     break
     finally:
         env.close()
 
-    reasons = Counter(result["termination_reason"] for result in results)
-    summary = {
+    summary = _summarize_results(results)
+    summary["track_name"] = results[0]["track_name"]
+    summary["track_seed"] = results[0]["track_seed"]
+    summary["track_length"] = results[0]["track_length"]
+    summary["track_width"] = results[0]["track_width"]
+    summary["episode_results"] = results
+    return summary
+
+
+def evaluate(
+    model_path,
+    reward_profile,
+    track_ids,
+    episodes,
+    seed,
+    max_episode_steps,
+):
+    model_path = _resolve_model_path(model_path)
+    model = PPO.load(model_path, device="cpu")
+    tracks = {}
+    all_results = []
+
+    for track_index, track_id in enumerate(track_ids):
+        track_summary = _evaluate_track(
+            model=model,
+            track_id=track_id,
+            reward_profile=reward_profile,
+            episodes=episodes,
+            seed=seed + track_index,
+            max_episode_steps=max_episode_steps,
+        )
+        tracks[track_id] = track_summary
+        all_results.extend(track_summary["episode_results"])
+
+    return {
         "model": str(model_path),
         "reward_profile": reward_profile,
-        "episodes": episodes,
         "seed": seed,
-        "success_rate": float(np.mean([result["success"] for result in results])),
-        "return": _mean_std([result["return"] for result in results]),
-        "steps": _mean_std([result["steps"] for result in results]),
-        "progress": _mean_std([result["progress"] for result in results]),
-        "wall_hits": _mean_std([result["wall_hits"] for result in results]),
-        "mean_speed": _mean_std([result["mean_speed"] for result in results]),
-        "mean_abs_e_y": _mean_std([result["mean_abs_e_y"] for result in results]),
-        "mean_abs_e_psi": _mean_std(
-            [result["mean_abs_e_psi"] for result in results]
-        ),
-        "mean_abs_steering_change": _mean_std(
-            [result["mean_abs_steering_change"] for result in results]
-        ),
-        "termination_counts": dict(sorted(reasons.items())),
-        "episode_results": results,
+        "episodes_per_track": episodes,
+        "track_ids": list(track_ids),
+        "aggregate": _summarize_results(all_results),
+        "tracks": tracks,
     }
-    return summary
 
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", help="Path to an SB3 PPO model (.zip optional)")
     parser.add_argument("--reward-profile", choices=sorted(REWARD_PROFILES), default="v2")
+    parser.add_argument(
+        "--tracks",
+        nargs="+",
+        choices=("held-out", *HELD_OUT_TRACK_IDS),
+        default=["sprint"],
+        help="Track IDs, or 'held-out' for the complete five-track set",
+    )
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--max-episode-steps", type=int, default=6000)
@@ -133,6 +193,10 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if args.episodes < 1 or args.max_episode_steps < 1:
         parser.error("episodes and max-episode-steps must be positive")
+    if "held-out" in args.tracks:
+        if len(args.tracks) != 1:
+            parser.error("'held-out' cannot be combined with individual tracks")
+        args.tracks = list(HELD_OUT_TRACK_IDS)
     return args
 
 
@@ -141,6 +205,7 @@ def main(argv=None):
     summary = evaluate(
         model_path=args.model,
         reward_profile=args.reward_profile,
+        track_ids=args.tracks,
         episodes=args.episodes,
         seed=args.seed,
         max_episode_steps=args.max_episode_steps,

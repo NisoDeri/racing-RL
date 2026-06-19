@@ -28,7 +28,15 @@ class Track:
     - Computing curvature for look-ahead
     """
     
-    def __init__(self, centerline_points: np.ndarray, width: float = None):
+    def __init__(
+        self,
+        centerline_points: np.ndarray,
+        width: float = None,
+        name: str = "Custom Track",
+        generation_seed: int = None,
+        generation_parameters: dict = None,
+        verbose: bool = False,
+    ):
         """
         Create a track from centerline points.
         
@@ -36,10 +44,18 @@ class Track:
             centerline_points: Nx2 array of (x, y) points defining centerline
                               Should form a closed loop (last connects to first)
             width: Track width in meters (uses config default if None)
+            name: Human-readable track identifier for metrics and rendering.
+            generation_seed: Procedural seed, or None for hand-authored tracks.
+            generation_parameters: Optional procedural coefficients for reporting.
+            verbose: Print boundary/wall construction diagnostics.
         """
         self.centerline = np.array(centerline_points, dtype=np.float64)
         self.width = width if width is not None else TRACK.width
         self.half_width = self.width / 2
+        self.name = name
+        self.generation_seed = generation_seed
+        self.generation_parameters = generation_parameters or {}
+        self.verbose = verbose
         
         # Boundary cache (computed lazily by get_boundary_points)
         self._cached_inner = None
@@ -278,9 +294,14 @@ class Track:
         
         try:
             inner, outer = self._compute_boundary_shapely()
-            print(f"  Boundary (Shapely): inner={len(inner)} pts, outer={len(outer)} pts")
+            if self.verbose:
+                print(
+                    f"  Boundary (Shapely): inner={len(inner)} pts, "
+                    f"outer={len(outer)} pts"
+                )
         except Exception as e:
-            print(f"  Shapely boundary failed ({e}), using naive offset")
+            if self.verbose:
+                print(f"  Shapely boundary failed ({e}), using naive offset")
             inner, outer = self._compute_boundary_naive()
         
         self._cached_inner = inner
@@ -304,8 +325,8 @@ class Track:
         if not poly.is_valid:
             poly = make_valid(poly)
 
-        outer_poly = poly.buffer(self.half_width, resolution=8, join_style=1)
-        inner_poly = poly.buffer(-self.half_width, resolution=8, join_style=1)
+        outer_poly = poly.buffer(self.half_width, quad_segs=8, join_style=1)
+        inner_poly = poly.buffer(-self.half_width, quad_segs=8, join_style=1)
 
         if inner_poly.is_empty:
             raise ValueError("Inner buffer empty — half_width exceeds min turn radius everywhere")
@@ -395,7 +416,11 @@ class Track:
             )
 
         self.wall_bodies = [inner_wall, outer_wall]
-        print(f"  Track walls created: {n_inner} inner + {n_outer} outer = {n_inner + n_outer} edges")
+        if self.verbose:
+            print(
+                f"  Track walls created: {n_inner} inner + {n_outer} outer "
+                f"= {n_inner + n_outer} edges"
+            )
         return inner_wall, outer_wall
     
     def get_checkpoint_positions(self, num_checkpoints=None):
@@ -491,7 +516,7 @@ class Track:
             
             points.append([cx + x, cy + y])
         
-        return Track(np.array(points), width=track_width)
+        return Track(np.array(points), width=track_width, name="Oval")
     
     @staticmethod
     def create_sprint_track(track_width=12) -> 'Track':
@@ -511,7 +536,9 @@ class Track:
         
         x = radius * np.cos(angles)
         y = radius * np.sin(angles)
-        return Track(np.column_stack([x, y]), width=track_width)
+        return Track(
+            np.column_stack([x, y]), width=track_width, name="Sprint Circuit"
+        )
     
     @staticmethod
     def create_complex_track(track_width=12) -> 'Track':
@@ -544,7 +571,9 @@ class Track:
         
         x = radius * np.cos(angles)
         y = radius * np.sin(angles)
-        return Track(np.column_stack([x, y]), width=track_width)
+        return Track(
+            np.column_stack([x, y]), width=track_width, name="Grand Prix Circuit"
+        )
 
     def get_pose_at_s(self, s: float):
         """Return (position, heading, segment_idx) on centerline at arc-length s."""

@@ -11,8 +11,8 @@ University project — the goal is to train RL agents (PPO, SAC) that learn to d
 ```
 f1/
 ├── main.py                  # Interactive demo (keyboard-controlled driving)
-├── train.py                 # PPO baseline and reward-ablation runner
-├── evaluate.py              # Headless policy metrics and JSON output
+├── train.py                 # PPO fixed/random-track training runner
+├── evaluate.py              # Held-out track metrics and JSON output
 ├── config.py                # All tunable parameters (physics, car, track, sensors, rendering)
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
@@ -23,7 +23,8 @@ f1/
     │   └── car.py           # Car body: engine force, steering torque, lateral grip, downforce
     │
     ├── track/
-    │   └── track.py         # Centerline geometry, Frenet frame, Shapely boundaries, walls
+    │   ├── track.py         # Centerline geometry, Frenet frame, boundaries, walls
+    │   └── random_track.py  # Seeded Phase 4 tracks and held-out track set
     │
     ├── sensors/
     │   └── sensor.py        # RayCaster (30-ray LiDAR) + FrenetObserver
@@ -102,9 +103,17 @@ protections. Use distinct run names so ablation outputs never overwrite each oth
 # Phase 3 shaped-reward run
 .venv/bin/python train.py --reward-profile v2 --seed 42 --run-name ppo_sprint_v2_seed42
 
-# Headless metrics; repeat with v1/v2 models for the before/after table
+# Phase 4: 5M transitions over parallel per-episode randomized tracks
+.venv/bin/python train.py --track-mode random --reward-profile v2 \
+  --timesteps 5000000 --n-envs 8 --seed 42 --run-name ppo_random_v2_seed42
+
+# Evaluate on Sprint, Grand Prix, and procedural seeds 1001/1002/1003
+.venv/bin/python evaluate.py models/ppo_random_v2_seed42_final.zip \
+  --tracks held-out --episodes 20 --output results/phase4_seed42.json
+
+# Phase 3 single-track metrics remain available
 .venv/bin/python evaluate.py models/ppo_sprint_v2_seed42_final.zip \
-  --reward-profile v2 --episodes 100 --output results/phase3_v2_seed42.json
+  --tracks sprint --reward-profile v2 --episodes 20
 ```
 
 The committed model and TensorBoard files use Git LFS. Run `git lfs pull` before
@@ -138,8 +147,24 @@ r(θ) = R₀ + Σ aₖ·cos(kθ) + bₖ·sin(kθ)
 
 - **Sprint Circuit** (~750m): base radius 100m, harmonics at k=2,3,5,7
 - **Grand Prix Circuit** (~3.5km): base radius 480m, same harmonics + a Gaussian-windowed high-frequency esses section (k=14, localized near θ≈1.2 rad)
+- **Phase 4 training distribution**: a new validated 300-point Fourier circuit per
+  episode, with base radius 150–500m, randomized harmonics/phases, and width 18–28m
 
 Track boundaries are computed using **Shapely's polygon buffer** operation (Minkowski sum), which cleanly handles self-intersection artifacts at tight turns. Inner/outer boundaries become Box2D static edge chains for collision.
+
+Procedural generation is deterministic from Gymnasium's seed. Invalid/self-intersecting
+samples are rejected. Seed `2001` is reserved for validation/checkpoint selection.
+Seeds `1001`, `1002`, and `1003` are separately excluded from training and, together
+with Sprint and Grand Prix, form the fixed five-track final evaluation set.
+Tracks with curvature above `0.2 m⁻¹` (turn radius below 5m) are rejected as
+incompatible with the car geometry. Validation and held-out episodes use reproducible
+random longitudinal starts with small lateral and heading perturbations.
+
+To render a sequence of generated tracks with a random policy:
+
+```bash
+.venv/bin/python watch_env.py --track-mode random --seed 42
+```
 
 ### Frenet Frame Coordinate System
 
@@ -255,10 +280,18 @@ Each step returns additional metrics:
     'on_track': bool,        # within track boundaries
     'laps': int,             # completed laps
     'total_progress': float, # cumulative distance traveled (meters)
+    'progress_fraction': float,
     'wall_hits': int,
     'mean_abs_steering_change': float,
     'termination_reason': str | None,
     'reward_profile': str,
+    'track_name': str,
+    'track_seed': int | None,
+    'track_length': float,
+    'track_width': float,
+    'start_s': float,
+    'start_lateral_offset': float,
+    'start_heading_offset': float,
     'reward_terms': dict,
 }
 ```
