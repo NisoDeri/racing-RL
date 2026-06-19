@@ -1,5 +1,5 @@
 """
-PPO training for the Phase 2 baseline and Phase 3 reward experiments.
+PPO training for fixed-track baselines and Phase 4 domain randomization.
 
 Run:
     python train.py
@@ -32,6 +32,11 @@ from stable_baselines3.common.callbacks import (
 )
 
 from src.track.track import Track
+from src.track.random_track import (
+    VALIDATION_RANDOM_TRACK_SEED,
+    RandomTrackGenerator,
+    create_validation_track,
+)
 from src.env.racing_env import REWARD_PROFILES, RacingEnv
 
 
@@ -66,15 +71,21 @@ def _sprint_track():
     return Track.create_sprint_track(track_width=14)
 
 
-def make_env(seed=0, reward_profile="v2", max_episode_steps=6000):
+def make_env(track_mode="sprint", reward_profile="v2", max_episode_steps=6000):
     def _init():
+        if track_mode == "random":
+            track_kwargs = {"track_generator": RandomTrackGenerator()}
+        elif track_mode == "validation":
+            track_kwargs = {"track_creator": create_validation_track}
+        else:
+            track_kwargs = {"track_creator": _sprint_track}
         env = RacingEnv(
             render_mode=None,
-            track_creator=_sprint_track,
+            randomize_start=(track_mode == "validation"),
             max_episode_steps=max_episode_steps,
             reward_profile=reward_profile,
+            **track_kwargs,
         )
-        env.reset(seed=seed)
         return env
     return _init
 
@@ -93,7 +104,10 @@ class RacingMetricsCallback(BaseCallback):
         self._ep_wall_hits = []
         self._ep_laps = []
         self._ep_progress = []
+        self._ep_progress_fraction = []
         self._ep_smoothness = []
+        self._ep_track_lengths = []
+        self._ep_track_widths = []
         self._end_reasons = Counter()
 
     def _on_step(self):
@@ -102,9 +116,12 @@ class RacingMetricsCallback(BaseCallback):
                 self._ep_wall_hits.append(info.get("wall_hits", 0))
                 self._ep_laps.append(info.get("laps", 0))
                 self._ep_progress.append(info.get("total_progress", 0.0))
+                self._ep_progress_fraction.append(info.get("progress_fraction", 0.0))
                 self._ep_smoothness.append(
                     info.get("mean_abs_steering_change", 0.0)
                 )
+                self._ep_track_lengths.append(info.get("track_length", 0.0))
+                self._ep_track_widths.append(info.get("track_width", 0.0))
                 self._end_reasons[info.get("termination_reason") or "unknown"] += 1
 
         if len(self._ep_wall_hits) >= 10:               # log every 10 episodes
@@ -112,10 +129,20 @@ class RacingMetricsCallback(BaseCallback):
             self.logger.record("racing/mean_laps",      np.mean(self._ep_laps))
             self.logger.record("racing/mean_progress", np.mean(self._ep_progress))
             self.logger.record(
+                "racing/mean_progress_fraction",
+                np.mean(self._ep_progress_fraction),
+            )
+            self.logger.record(
                 "racing/mean_steering_change", np.mean(self._ep_smoothness)
             )
             self.logger.record(
                 "racing/lap_success_rate", np.mean(np.asarray(self._ep_laps) > 0)
+            )
+            self.logger.record(
+                "racing/mean_track_length", np.mean(self._ep_track_lengths)
+            )
+            self.logger.record(
+                "racing/mean_track_width", np.mean(self._ep_track_widths)
             )
             episode_count = sum(self._end_reasons.values())
             for reason, count in self._end_reasons.items():
@@ -123,7 +150,10 @@ class RacingMetricsCallback(BaseCallback):
             self._ep_wall_hits.clear()
             self._ep_laps.clear()
             self._ep_progress.clear()
+            self._ep_progress_fraction.clear()
             self._ep_smoothness.clear()
+            self._ep_track_lengths.clear()
+            self._ep_track_widths.clear()
             self._end_reasons.clear()
         return True
 
@@ -138,10 +168,11 @@ def _default_batch_size(rollout_size):
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
-        description="Train the Sprint Circuit PPO baseline/reward ablation."
+        description="Train PPO on Sprint Circuit or randomized tracks."
     )
     parser.add_argument("--reward-profile", choices=sorted(REWARD_PROFILES), default="v2")
-    parser.add_argument("--timesteps", type=int, default=1_000_000)
+    parser.add_argument("--track-mode", choices=("sprint", "random"), default="sprint")
+    parser.add_argument("--timesteps", type=int)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument(
         "--n-envs",
@@ -164,6 +195,8 @@ def parse_args(argv=None):
     parser.add_argument("--no-progress-bar", action="store_true")
     args = parser.parse_args(argv)
 
+    if args.timesteps is None:
+        args.timesteps = 5_000_000 if args.track_mode == "random" else 1_000_000
     if args.n_envs < 1 or args.n_steps < 2 or args.timesteps < 1:
         parser.error("n-envs >= 1, n-steps >= 2, and timesteps >= 1 are required")
     rollout_size = args.n_envs * args.n_steps
@@ -172,7 +205,7 @@ def parse_args(argv=None):
     if args.batch_size < 2 or rollout_size % args.batch_size != 0:
         parser.error("batch-size must be >= 2 and divide n-envs * n-steps")
     if args.run_name is None:
-        args.run_name = f"ppo_sprint_{args.reward_profile}"
+        args.run_name = f"ppo_{args.track_mode}_{args.reward_profile}"
     return args
 
 
@@ -188,8 +221,15 @@ def main(argv=None):
     vec_cls = SubprocVecEnv if args.n_envs > 1 else DummyVecEnv
 
     print("=" * 60)
-    print("PPO training on Sprint Circuit")
+    print("PPO training")
     print(f"  Run       : {args.run_name} (reward {args.reward_profile})")
+    print(f"  Tracks    : {args.track_mode}")
+    eval_label = (
+        f"validation seed {VALIDATION_RANDOM_TRACK_SEED}"
+        if args.track_mode == "random"
+        else "sprint"
+    )
+    print(f"  Eval track: {eval_label}")
     print(f"  Device    : {args.device}")
     print(f"  Envs      : {args.n_envs} × {vec_cls.__name__}  (frame stack: {N_STACK})")
     print(f"  Batch     : {args.batch_size}  (rollout buffer: {args.n_steps * args.n_envs:,} transitions)")
@@ -202,7 +242,7 @@ def main(argv=None):
     # --- Training envs (SubprocVecEnv = one OS process per env, true parallelism) ---
     train_env = make_vec_env(
         make_env(
-            seed=args.seed,
+            track_mode=args.track_mode,
             reward_profile=args.reward_profile,
             max_episode_steps=args.max_episode_steps,
         ),
@@ -212,10 +252,12 @@ def main(argv=None):
     )
     train_env = VecFrameStack(train_env, n_stack=N_STACK)
 
-    # --- Eval env (single env, always DummyVecEnv — no benefit from SubprocVecEnv) ---
+    # Use a reserved validation track for model selection. Final held-out tracks
+    # are evaluated only after training via evaluate.py.
+    eval_track_mode = "validation" if args.track_mode == "random" else "sprint"
     eval_env = make_vec_env(
         make_env(
-            seed=args.seed + 99,
+            track_mode=eval_track_mode,
             reward_profile=args.reward_profile,
             max_episode_steps=args.max_episode_steps,
         ),

@@ -36,7 +36,8 @@ f1/
     │   ├── __init__.py           # Re-exports RayCaster, FrenetObserver
     │   └── sensor.py             # RayCaster + Frenet-frame observation
     └── track/
-        ├── __init__.py           # Re-exports Track
+        ├── __init__.py           # Re-exports track and Phase 4 factories
+        ├── random_track.py       # Seeded random tracks + held-out track set
         └── track.py              # Centerline, Frenet math, walls, checkpoints
 ```
 
@@ -46,9 +47,9 @@ f1/
 
 - **`main.py`** — **Fully implemented.** Entry point for the interactive (keyboard-controlled) simulation. Builds the World/Track/Cars/Renderer/Sensors, runs the main game loop at 60 FPS, handles keyboard input (WASD/arrows for steer & throttle, R reset, T switch track, C camera toggle, V sensors toggle, P screenshot, +/- zoom, ESC quit), spawns multiple player cars plus an optional static "control car" that drives on the centerline, runs the physics step, casts rays, tracks lap/sector timing with best-lap detection, and renders the full frame.
 
-- **`train.py`** — **Fully implemented for Phases 2–3.** Configurable SB3 PPO runner with four-frame stacking, parallel environments, named `v1`/`v2` reward profiles, deterministic evaluation, checkpoints, TensorBoard logging, seeds, and Phase 3 driving metrics.
+- **`train.py`** — **Fully implemented for Phases 2–4.** Configurable SB3 PPO runner with four-frame stacking, parallel environments, fixed or per-episode randomized tracks, reward profiles, deterministic Sprint evaluation, checkpoints, TensorBoard logging, and track/driving metrics.
 
-- **`evaluate.py`** — **Fully implemented for Sprint Circuit evaluation.** Loads a PPO model, runs deterministic headless episodes, and reports return, success, progress, wall hits, speed, Frenet errors, steering smoothness, and termination reasons as console/JSON output.
+- **`evaluate.py`** — **Fully implemented for held-out evaluation.** Loads a PPO model and reports per-track plus aggregate metrics over Sprint, Grand Prix, and three fixed procedural tracks as console/JSON output.
 
 - **`config.py`** — **Fully implemented.** Centralized configuration via `@dataclass` instances. Defines `SimConfig` (timestep, solver iterations, pixels/meter), `RaceConfig` (number of players, static-control car settings, spawn gaps, collision grace steps), `CarConfig` (F1-tuned dimensions, mass 798kg, ~22kN forward force, braking, steering angle, grip/drag), `TrackConfig` (track width, curvature sampling, wall friction/restitution, sector count), `SensorConfig` (24 forward rays + 6 mirror rays, max distance, Frenet lookahead), and `RenderConfig` (window size, colors, camera). Exposes global singletons `SIM`, `RACE`, `CAR`, `TRACK`, `SENSOR`, `RENDER`.
 
@@ -88,15 +89,17 @@ f1/
 
 - **`src/track/track.py`** — **Fully implemented.** Core track geometry. Builds a `Track` from a closed centerline polyline, precomputes segment vectors, lengths, cumulative arc-length, tangents, normals, and per-point curvature. Implements `project_point()` (find nearest centerline point), `get_frenet_coordinates()` (the heart of state-based observation: returns `s`, `e_y`, `e_psi`, `kappa`, projected point), `get_lookahead_curvature()` (curvature at N points ahead), `is_inside_track()`. Computes inner/outer boundaries via Shapely polygon buffer (with a per-point-offset naive fallback), and aligns the inner ring to the outer ring to avoid diagonal seam artifacts at sharp corners. `create_walls()` builds Box2D static edge bodies for both boundaries tagged for collision detection. `get_checkpoint_positions()` produces sector lines. Includes three static factory methods: `create_oval_track()` (simple oval, used for testing), `create_sprint_track()` (~750m compact circuit via Fourier harmonics), and `create_complex_track()` (~3.5km Grand Prix circuit with two straights, varied radii, hairpins, chicanes, and an "esses" section built from a Gaussian-windowed high-frequency oscillation). `get_pose_at_s()` returns position+heading at any arc-length (used for grid spawn).
 
+- **`src/track/random_track.py`** — **Fully implemented for Phase 4.** Samples Fourier coefficients, phases, harmonics, and widths from the training distribution; rejects invalid or excessively sharp geometry; records generation metadata; reserves a separate validation seed; excludes procedural evaluation seeds; and constructs the five fixed held-out tracks.
+
 ## Key entry points
 
 - **Run the playable sim:** `python main.py` (keyboard control, switchable tracks, HUD).
 - **Use the RL environment:** `from src.env import RacingEnv; env = RacingEnv(render_mode="human")` — standard Gymnasium API.
-- **Train PPO:** `python train.py --reward-profile v2 --seed 42`.
-- **Evaluate PPO:** `python evaluate.py MODEL.zip --reward-profile v2 --episodes 100`.
+- **Train randomized PPO:** `python train.py --track-mode random --n-envs 8 --seed 42`.
+- **Evaluate held-out tracks:** `python evaluate.py MODEL.zip --tracks held-out`.
 
 ## Notes on implementation maturity
 
 - The interactive simulation (`main.py` + `physics/` + `rendering/` + `track/` + `sensors/`) is complete and supports multi-car play with collision tracking.
 - The RL environment is currently single-car. Raycasts are wired into observations, but opponent spawning and curriculum/self-play remain Phase 5–6 work.
-- `train.py` trains PPO with four-frame stacking and named reward profiles. `evaluate.py` produces reproducible JSON evaluation metrics. SAC and domain-randomized training remain later phases.
+- `train.py` trains PPO with four-frame stacking, reward profiles, and fixed/random track modes. `evaluate.py` produces reproducible held-out JSON metrics. SAC remains a later phase.

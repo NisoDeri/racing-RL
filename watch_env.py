@@ -1,10 +1,11 @@
-"""
-Watch RacingEnv run with a random agent (rendered in real time).
-Run: python watch_env.py
-"""
-import sys
+"""Watch RacingEnv with a random agent on fixed or procedural tracks."""
+
+import argparse
+
 import numpy as np
+
 from src.env.racing_env import RacingEnv
+from src.track.random_track import RandomTrackGenerator
 from src.track.track import Track
 
 
@@ -12,25 +13,52 @@ def _sprint():
     return Track.create_sprint_track(track_width=14)
 
 
-env = RacingEnv(render_mode="human", track_creator=_sprint, max_episode_steps=6000)
-obs, info = env.reset(seed=0)
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--track-mode", choices=("sprint", "random"), default="sprint")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--max-episode-steps", type=int, default=6000)
+    return parser.parse_args(argv)
 
-rng = np.random.default_rng(42)
-episode = 1
-step = 0
 
-print("Random agent running — close the window to stop.")
-print(f"Obs shape: {obs.shape}  |  obs[0:3] (first 3 rays): {obs[0:3].round(3)}")
+def main(argv=None):
+    args = parse_args(argv)
+    track_kwargs = (
+        {"track_generator": RandomTrackGenerator()}
+        if args.track_mode == "random"
+        else {"track_creator": _sprint}
+    )
+    env = RacingEnv(
+        render_mode="human",
+        max_episode_steps=args.max_episode_steps,
+        **track_kwargs,
+    )
+    obs, info = env.reset(seed=args.seed)
+    rng = np.random.default_rng(args.seed + 1)
+    episode = 1
 
-while True:
-    action = rng.uniform(-1, 1, size=2).astype(np.float32)
-    obs, reward, terminated, truncated, info = env.step(action)
-    step += 1
+    print("Random agent running - close the window to stop.")
+    print(f"Track: {info['track_name']} | seed: {info['track_seed']}")
+    print(f"Observation shape: {obs.shape}")
 
-    if terminated or truncated:
-        reason = "off-track" if terminated else "max steps"
-        print(f"Episode {episode} ended ({reason}) — steps: {step}, "
-              f"wall hits: {info['wall_hits']}")
-        obs, info = env.reset()
-        episode += 1
-        step = 0
+    try:
+        while True:
+            action = rng.uniform(-1, 1, size=2).astype(np.float32)
+            obs, _, terminated, truncated, info = env.step(action)
+            if env.window_closed:
+                break
+
+            if terminated or truncated:
+                print(
+                    f"Episode {episode} ended ({info['termination_reason']}) - "
+                    f"steps: {info['steps']}, wall hits: {info['wall_hits']}"
+                )
+                obs, info = env.reset()
+                episode += 1
+                print(f"Track: {info['track_name']} | seed: {info['track_seed']}")
+    finally:
+        env.close()
+
+
+if __name__ == "__main__":
+    main()
