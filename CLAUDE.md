@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO/SAC agents to race autonomously using only on-board sensors. Phases 1–3 are complete; active work is Phase 4 domain randomization and zero-shot evaluation.
+A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO/SAC agents to race autonomously using only on-board sensors. Phases 1–4 are complete; the next planned work is the Phase 5 multi-car curriculum.
 
 ## Commands
 
@@ -86,6 +86,39 @@ All physics, sensor, and render parameters live in `config.py` as global datacla
 See `NEXT_PHASE.md` for the full 10-phase plan. Current status:
 - **Phase 1** (RL contract — obs/action/reward) ✓ complete
 - **Phase 2** (PPO baseline on Sprint Circuit) ✓ complete; artifacts use Git LFS
-- **Phase 3** (reward iteration + reproducible evaluation) ✓ complete
-- **Phase 4** (domain randomization + held-out track evaluation) — active
-- **Phases 5–10** — curriculum, self-play, advanced experiments, SAC, report
+- **Phase 3** (reward iteration + reproducible evaluation) ✓ complete; three seeds per reward profile
+- **Phase 4** (domain randomization + held-out track evaluation) ✓ complete; three 5M-step seeds
+- **Phase 5** (multi-car curriculum) — next
+- **Phases 6–10** — self-play, advanced experiments, SAC, evaluation, report
+
+## Verified Experiment Results
+
+Results below were produced on seeds 42, 43, and 44. Model selection uses only the reserved validation track (procedural seed 2001); held-out results use Sprint, Grand Prix, and procedural seeds 1001–1003.
+
+### Phase 3 — Reward Shaping
+
+Both profiles were trained for 1M transitions per seed with the same PPO configuration. Each final model was evaluated on five seeded randomized starts on Sprint.
+
+| Metric (mean ± seed std) | v1 control | v2 shaped reward |
+|---|---:|---:|
+| Lap success | 0% ± 0% | 100% ± 0% |
+| Laps per episode | 0 ± 0 | 8 ± 0 |
+| Progress fraction | −8.012 ± 0.144 | 8.491 ± 0.067 |
+| Wall hits | 29.40 ± 1.73 | 0.47 ± 0.66 |
+
+The v1 agent learned the documented reverse-driving exploit: it accumulated positive reward while completing no valid laps. The v2 profile eliminated that exploit and generalized across randomized Sprint starts. Raw v1 and v2 returns are not directly comparable because their reward definitions differ.
+
+### Phase 4 — Domain Randomization
+
+PPO v2 was trained from scratch for 5M transitions on a new validated procedural track each episode, with eight parallel environments. The best checkpoint for each seed was selected on validation seed 2001. Final evaluation used 20 episodes per held-out track per seed: 300 episodes total.
+
+| Metric (mean ± seed std) | Result |
+|---|---:|
+| Held-out lap success | 100% ± 0% |
+| Progress fraction | 3.829 ± 0.050 |
+| Wall hits | 11.59 ± 4.87 |
+| Mean speed | 78.37 ± 0.24 |
+
+All five held-out tracks achieved 100% lap success over 60 episodes each. Sprint remains the main limitation: it averaged 38.05 wall hits because its 14m width is narrower than the 18–28m procedural training distribution. One seed-44 Sprint episode terminated as `stuck_wall` after already completing a lap, so it still counted as successful under the `laps > 0` criterion.
+
+Final evaluation files are `results/phase4_v2_seed{42,43,44}_heldout_final.json`; validation-selected models are `models/phase4/v2/seed*/phase4_v2_seed*/best_model.zip`. The full suite passes: **50 tests passed** on 2026-06-22.

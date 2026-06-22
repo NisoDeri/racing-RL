@@ -32,3 +32,18 @@ knowledge.txt
 features_to_add.txt
 links.txt
 youtube_video.txt
+
+# Generated RL experiment artifacts
+logs/PPO_3/
+logs/phase3/preflight/
+models/phase3/preflight/
+models/phase3_test_final.zip
+models/phase*/**/*_steps.zip
+models/phase3/**/best_model.zip
+models/phase4/**/*_final.zip
+results/*_quick.json
+results/*_preflight.json
+results/*.stdout
+results/phase2_model_v2_diagnostic.json
+results/phase2_sprint_full.json
+results/phase3_test.json
