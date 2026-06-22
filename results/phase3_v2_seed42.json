@@ -1,0 +1,213 @@
+{
+  "model": "models/phase3/v2/seed42/phase3_v2_seed42_final.zip",
+  "reward_profile": "v2",
+  "seed": 123,
+  "episodes_per_track": 5,
+  "track_ids": [
+    "sprint"
+  ],
+  "aggregate": {
+    "episodes": 5,
+    "success_rate": 1.0,
+    "return": {
+      "mean": 9780.191952502588,
+      "std": 44.084128659567575
+    },
+    "steps": {
+      "mean": 6000.0,
+      "std": 0.0
+    },
+    "progress": {
+      "mean": 6311.805056840471,
+      "std": 28.237826914213848
+    },
+    "progress_fraction": {
+      "mean": 8.46210625435982,
+      "std": 0.037857869434883104
+    },
+    "wall_hits": {
+      "mean": 0.0,
+      "std": 0.0
+    },
+    "mean_speed": {
+      "mean": 63.53386454943902,
+      "std": 0.25151547267500235
+    },
+    "mean_abs_e_y": {
+      "mean": 1.2183168054403317,
+      "std": 0.02484966772061457
+    },
+    "mean_abs_e_psi": {
+      "mean": 0.10853326154224166,
+      "std": 0.0016773097231393087
+    },
+    "mean_abs_steering_change": {
+      "mean": 0.07381593756179014,
+      "std": 0.0017944226191336755
+    },
+    "termination_counts": {
+      "max_steps": 5
+    }
+  },
+  "tracks": {
+    "sprint": {
+      "episodes": 5,
+      "success_rate": 1.0,
+      "return": {
+        "mean": 9780.191952502588,
+        "std": 44.084128659567575
+      },
+      "steps": {
+        "mean": 6000.0,
+        "std": 0.0
+      },
+      "progress": {
+        "mean": 6311.805056840471,
+        "std": 28.237826914213848
+      },
+      "progress_fraction": {
+        "mean": 8.46210625435982,
+        "std": 0.037857869434883104
+      },
+      "wall_hits": {
+        "mean": 0.0,
+        "std": 0.0
+      },
+      "mean_speed": {
+        "mean": 63.53386454943902,
+        "std": 0.25151547267500235
+      },
+      "mean_abs_e_y": {
+        "mean": 1.2183168054403317,
+        "std": 0.02484966772061457
+      },
+      "mean_abs_e_psi": {
+        "mean": 0.10853326154224166,
+        "std": 0.0016773097231393087
+      },
+      "mean_abs_steering_change": {
+        "mean": 0.07381593756179014,
+        "std": 0.0017944226191336755
+      },
+      "termination_counts": {
+        "max_steps": 5
+      },
+      "track_name": "Sprint Circuit",
+      "track_seed": null,
+      "track_length": 745.8905462914179,
+      "track_width": 14.0,
+      "episode_results": [
+        {
+          "episode": 1,
+          "return": 9828.597768557025,
+          "steps": 6000,
+          "laps": 8,
+          "success": true,
+          "progress": 6334.101066324425,
+          "progress_fraction": 8.49199805228488,
+          "wall_hits": 0,
+          "mean_speed": 63.86519760628119,
+          "mean_abs_e_y": 1.191233604648041,
+          "mean_abs_e_psi": 0.10750731743288211,
+          "mean_abs_steering_change": 0.07254311573505402,
+          "termination_reason": "max_steps",
+          "track_name": "Sprint Circuit",
+          "track_seed": null,
+          "track_length": 745.8905462914179,
+          "track_width": 14.0,
+          "start_s": 508.9598040411246,
+          "start_lateral_offset": -0.6246505736768884,
+          "start_heading_offset": -0.048806409408137734
+        },
+        {
+          "episode": 2,
+          "return": 9765.44773726957,
+          "steps": 6000,
+          "laps": 8,
+          "success": true,
+          "progress": 6298.986143317775,
+          "progress_fraction": 8.444920202617467,
+          "wall_hits": 0,
+          "mean_speed": 63.4176385339211,
+          "mean_abs_e_y": 1.2279636617399483,
+          "mean_abs_e_psi": 0.10671055723297526,
+          "mean_abs_steering_change": 0.07191275448103746,
+          "termination_reason": "max_steps",
+          "track_name": "Sprint Circuit",
+          "track_seed": null,
+          "track_length": 745.8905462914179,
+          "track_width": 14.0,
+          "start_s": 137.52119060276863,
+          "start_lateral_offset": -0.45373173848095755,
+          "start_heading_offset": 0.05447076718530607
+        },
+        {
+          "episode": 3,
+          "return": 9797.888110043481,
+          "steps": 6000,
+          "laps": 8,
+          "success": true,
+          "progress": 6336.32567257163,
+          "progress_fraction": 8.494980535784993,
+          "wall_hits": 0,
+          "mean_speed": 63.56509801821217,
+          "mean_abs_e_y": 1.205095544408512,
+          "mean_abs_e_psi": 0.108270461262022,
+          "mean_abs_steering_change": 0.07710919172565142,
+          "termination_reason": "max_steps",
+          "track_name": "Sprint Circuit",
+          "track_seed": null,
+          "track_length": 745.8905462914179,
+          "track_width": 14.0,
+          "start_s": 688.7143049938493,
+          "start_lateral_offset": -0.3127958430840513,
+          "start_heading_offset": 0.05580769898068891
+        },
+        {
+          "episode": 4,
+          "return": 9701.955612272024,
+          "steps": 6000,
+          "laps": 8,
+          "success": true,
+          "progress": 6262.0475764399625,
+          "progress_fraction": 8.395397431399262,
+          "wall_hits": 0,
+          "mean_speed": 63.126359341644466,
+          "mean_abs_e_y": 1.262072903149377,
+          "mean_abs_e_psi": 0.11163533752245271,
+          "mean_abs_steering_change": 0.07380822833875815,
+          "termination_reason": "max_steps",
+          "track_name": "Sprint Circuit",
+          "track_seed": null,
+          "track_length": 745.8905462914179,
+          "track_width": 14.0,
+          "start_s": 663.7625470054435,
+          "start_lateral_offset": 0.01815863732134464,
+          "start_heading_offset": -0.04451207420486729
+        },
+        {
+          "episode": 5,
+          "return": 9807.07053437084,
+          "steps": 6000,
+          "laps": 8,
+          "success": true,
+          "progress": 6327.5648255485585,
+          "progress_fraction": 8.483235049712498,
+          "wall_hits": 0,
+          "mean_speed": 63.69502924713617,
+          "mean_abs_e_y": 1.2052183132557803,
+          "mean_abs_e_psi": 0.10854263426087622,
+          "mean_abs_steering_change": 0.0737063975284497,
+          "termination_reason": "max_steps",
+          "track_name": "Sprint Circuit",
+          "track_seed": null,
+          "track_length": 745.8905462914179,
+          "track_width": 14.0,
+          "start_s": 614.7940143892083,
+          "start_lateral_offset": -0.4007318512748664,
+          "start_heading_offset": 0.04214395096580815
+        }
+      ]
+    }
+  }
+}

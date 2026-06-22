@@ -11,6 +11,8 @@ University project — the goal is to train RL agents (PPO, SAC) that learn to d
 ```
 f1/
 ├── main.py                  # Interactive demo (keyboard-controlled driving)
+├── train.py                 # PPO fixed/random-track training runner
+├── evaluate.py              # Held-out track metrics and JSON output
 ├── config.py                # All tunable parameters (physics, car, track, sensors, rendering)
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
@@ -21,7 +23,8 @@ f1/
     │   └── car.py           # Car body: engine force, steering torque, lateral grip, downforce
     │
     ├── track/
-    │   └── track.py         # Centerline geometry, Frenet frame, Shapely boundaries, walls
+    │   ├── track.py         # Centerline geometry, Frenet frame, boundaries, walls
+    │   └── random_track.py  # Seeded Phase 4 tracks and held-out track set
     │
     ├── sensors/
     │   └── sensor.py        # RayCaster (30-ray LiDAR) + FrenetObserver
@@ -39,19 +42,20 @@ f1/
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.12+
 - pip
 
 ### Installation
 
 ```bash
-pip install -r requirements.txt
+python3.12 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
 ### Interactive Demo
 
 ```bash
-python main.py
+.venv/bin/python main.py
 ```
 
 **Controls:**
@@ -87,6 +91,34 @@ for _ in range(1000):
 env.close()
 ```
 
+### Training and Evaluation
+
+`v1` reproduces the Phase 2 reward. `v2` is the Phase 3 default with reward-hacking
+protections. Use distinct run names so ablation outputs never overwrite each other.
+
+```bash
+# Phase 2 control run
+.venv/bin/python train.py --reward-profile v1 --seed 42 --run-name ppo_sprint_v1_seed42
+
+# Phase 3 shaped-reward run
+.venv/bin/python train.py --reward-profile v2 --seed 42 --run-name ppo_sprint_v2_seed42
+
+# Phase 4: 5M transitions over parallel per-episode randomized tracks
+.venv/bin/python train.py --track-mode random --reward-profile v2 \
+  --timesteps 5000000 --n-envs 8 --seed 42 --run-name ppo_random_v2_seed42
+
+# Evaluate on Sprint, Grand Prix, and procedural seeds 1001/1002/1003
+.venv/bin/python evaluate.py models/ppo_random_v2_seed42_final.zip \
+  --tracks held-out --episodes 20 --output results/phase4_seed42.json
+
+# Phase 3 single-track metrics remain available
+.venv/bin/python evaluate.py models/ppo_sprint_v2_seed42_final.zip \
+  --tracks sprint --reward-profile v2 --episodes 20
+```
+
+The committed model and TensorBoard files use Git LFS. Run `git lfs pull` before
+evaluating those artifacts.
+
 ---
 
 ## Implementation Overview
@@ -115,8 +147,24 @@ r(θ) = R₀ + Σ aₖ·cos(kθ) + bₖ·sin(kθ)
 
 - **Sprint Circuit** (~750m): base radius 100m, harmonics at k=2,3,5,7
 - **Grand Prix Circuit** (~3.5km): base radius 480m, same harmonics + a Gaussian-windowed high-frequency esses section (k=14, localized near θ≈1.2 rad)
+- **Phase 4 training distribution**: a new validated 300-point Fourier circuit per
+  episode, with base radius 150–500m, randomized harmonics/phases, and width 18–28m
 
 Track boundaries are computed using **Shapely's polygon buffer** operation (Minkowski sum), which cleanly handles self-intersection artifacts at tight turns. Inner/outer boundaries become Box2D static edge chains for collision.
+
+Procedural generation is deterministic from Gymnasium's seed. Invalid/self-intersecting
+samples are rejected. Seed `2001` is reserved for validation/checkpoint selection.
+Seeds `1001`, `1002`, and `1003` are separately excluded from training and, together
+with Sprint and Grand Prix, form the fixed five-track final evaluation set.
+Tracks with curvature above `0.2 m⁻¹` (turn radius below 5m) are rejected as
+incompatible with the car geometry. Validation and held-out episodes use reproducible
+random longitudinal starts with small lateral and heading perturbations.
+
+To render a sequence of generated tracks with a random policy:
+
+```bash
+.venv/bin/python watch_env.py --track-mode random --seed 42
+```
 
 ### Frenet Frame Coordinate System
 
@@ -133,7 +181,8 @@ This representation is **track-agnostic** — the same observation semantics app
 
 ### Sensor Systems
 
-Two complementary observation channels:
+Two observation implementations are available. The current raycast-only policy uses
+the first; Frenet data is kept internal for reward shaping and optional later ablations.
 
 #### 1. RayCaster (LiDAR-like)
 
@@ -148,7 +197,7 @@ Each ray returns the distance to the nearest wall. The resulting 30-dimensional 
 
 Computes the Frenet frame observation plus **lookahead curvature** — the curvature values at 10 points sampled every 5m ahead of the car. This gives the agent predictive knowledge of upcoming turns (analogous to a driver who has studied the track map).
 
-Combined, the agent has both **reactive perception** (rays: "where are the walls right now?") and **predictive knowledge** (curvature lookahead: "what turns are coming?").
+The baseline deliberately does not expose Frenet features to the policy.
 
 ### Collision Detection
 
@@ -167,17 +216,18 @@ The environment follows the standard **Gymnasium API** (`reset`, `step`, `render
 
 ### Observation Space
 
-14-dimensional continuous vector (`Box`):
+34-dimensional continuous vector (`Box`):
 
 | Index | Feature | Normalization |
 |-------|---------|---------------|
-| 0 | Speed | ÷ 95 m/s (≈340 km/h theoretical max) |
-| 1 | Lateral error (eᵧ) | ÷ track half-width (±1 = at edge) |
-| 2 | Heading error (eᵩ) | ÷ π (full range = ±1) |
-| 3 | Curvature (κ) | × 100 (raw values are small) |
-| 4–13 | Lookahead curvatures (10 pts) | × 100 |
+| 0–29 | Raycast distances | ÷ 100m maximum range, clipped to `[0, 1]` |
+| 30 | Speed | ÷ 95 m/s; declared range `[0, 2]` |
+| 31 | Lateral velocity | ÷ 50 m/s, clipped to `[-2, 2]` |
+| 32 | Previous throttle | `[-1, 1]` |
+| 33 | Previous steering | `[-1, 1]` |
 
-All values are scaled to approximately [-1, 1] for stable neural network training.
+Training stacks four consecutive observations with `VecFrameStack`, producing a
+136-dimensional policy input that can encode motion over time.
 
 ### Action Space
 
@@ -190,19 +240,29 @@ All values are scaled to approximately [-1, 1] for stable neural network trainin
 
 ### Reward Function
 
-The reward is designed to encourage fast, clean driving:
+Two named profiles make the reward-shaping ablation reproducible. `v1` is the Phase 2
+baseline. `v2` is the Phase 3 default and retains the same core terms while closing
+three known exploits:
 
 | Component | Formula | Purpose |
 |-----------|---------|---------|
 | **Progress** | `+1.0 × ds` | Forward movement along the track (dominant signal) |
 | **Lateral penalty** | `−0.1 × \|eᵧ\| / half_width` | Stay near the centerline |
 | **Heading penalty** | `−0.05 × \|eᵩ\| / π` | Face the track direction |
-| **Speed bonus** | `+0.01 × speed` | Go faster |
-| **Off-track penalty** | `−10.0` (+ episode termination) | Don't leave the track |
+| **Speed bonus** | `+0.01 × max(forward_speed, 0)` | Reward forward driving, not reversing |
+| **Steering smoothness** | `−0.5 × \|Δsteering\|` | Avoid control jitter |
+| **Wall hit** | `−10.0` per new hit | Avoid collisions |
+| **Wall contact (v2)** | `−0.25` per touching step | Make sustained wall scraping costly |
+| **Time (v2)** | `−0.001` per step | Make camping costly |
+| **Off-track** | `−50.0` (+ termination) | Stay on the circuit |
+
+In `v2`, progress and speed bonuses are zero while touching a wall. After 120
+consecutive backwards-progress steps, the episode terminates with a `−25` penalty.
 
 ### Episode Termination
 
-- **Terminated**: car leaves the track boundaries
+- **Terminated**: off-track, stuck against a wall for 30 steps, or sustained reverse
+  progress for 120 steps (`v2`)
 - **Truncated**: episode exceeds `max_episode_steps` (default 6000 ≈ 100 seconds at 60 fps)
 
 ### Info Dict
@@ -220,6 +280,19 @@ Each step returns additional metrics:
     'on_track': bool,        # within track boundaries
     'laps': int,             # completed laps
     'total_progress': float, # cumulative distance traveled (meters)
+    'progress_fraction': float,
+    'wall_hits': int,
+    'mean_abs_steering_change': float,
+    'termination_reason': str | None,
+    'reward_profile': str,
+    'track_name': str,
+    'track_seed': int | None,
+    'track_length': float,
+    'track_width': float,
+    'start_s': float,
+    'start_lateral_offset': float,
+    'start_heading_offset': float,
+    'reward_terms': dict,
 }
 ```
 
