@@ -10,6 +10,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
 
 from src.env.racing_env import REWARD_PROFILES, RacingEnv
+from src.env.opponents import CURRICULUM_OPPONENTS, CURRICULUM_STAGES
 from src.track.random_track import HELD_OUT_TRACK_IDS, create_held_out_track
 
 
@@ -57,6 +58,15 @@ def _summarize_results(results):
         "mean_abs_steering_change": _mean_std(
             [result["mean_abs_steering_change"] for result in results]
         ),
+        "car_collisions": _mean_std(
+            [result["car_collisions"] for result in results]
+        ),
+        "overtake_count": _mean_std(
+            [result["overtake_count"] for result in results]
+        ),
+        "car_contact_steps": _mean_std(
+            [result["car_contact_steps"] for result in results]
+        ),
         "termination_counts": dict(sorted(reasons.items())),
     }
 
@@ -68,7 +78,12 @@ def _evaluate_track(
     episodes,
     seed,
     max_episode_steps,
+    curriculum_stage=None,
 ):
+    opponent_spec = (
+        CURRICULUM_OPPONENTS[curriculum_stage] if curriculum_stage else None
+    )
+
     def make_env():
         return RacingEnv(
             render_mode=None,
@@ -76,6 +91,7 @@ def _evaluate_track(
             randomize_start=True,
             max_episode_steps=max_episode_steps,
             reward_profile=reward_profile,
+            opponent_spec=opponent_spec,
         )
 
     env = VecFrameStack(DummyVecEnv([make_env]), n_stack=N_STACK)
@@ -110,6 +126,11 @@ def _evaluate_track(
                             "progress": float(info["total_progress"]),
                             "progress_fraction": float(info["progress_fraction"]),
                             "wall_hits": int(info["wall_hits"]),
+                            "car_collisions": int(info.get("car_collisions", 0)),
+                            "overtake_count": int(info.get("overtake_count", 0)),
+                            "car_contact_steps": int(
+                                info.get("car_contact_steps", 0)
+                            ),
                             "mean_speed": float(np.mean(speeds)),
                             "mean_abs_e_y": float(np.mean(lateral_errors)),
                             "mean_abs_e_psi": float(np.mean(heading_errors)),
@@ -146,6 +167,7 @@ def evaluate(
     episodes,
     seed,
     max_episode_steps,
+    curriculum_stage=None,
 ):
     model_path = _resolve_model_path(model_path)
     model = PPO.load(model_path, device="cpu")
@@ -160,6 +182,7 @@ def evaluate(
             episodes=episodes,
             seed=seed + track_index,
             max_episode_steps=max_episode_steps,
+            curriculum_stage=curriculum_stage,
         )
         tracks[track_id] = track_summary
         all_results.extend(track_summary["episode_results"])
@@ -167,6 +190,7 @@ def evaluate(
     return {
         "model": str(model_path),
         "reward_profile": reward_profile,
+        "curriculum_stage": curriculum_stage,
         "seed": seed,
         "episodes_per_track": episodes,
         "track_ids": list(track_ids),
@@ -178,7 +202,18 @@ def evaluate(
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("model", help="Path to an SB3 PPO model (.zip optional)")
-    parser.add_argument("--reward-profile", choices=sorted(REWARD_PROFILES), default="v2")
+    parser.add_argument(
+        "--reward-profile",
+        choices=sorted(REWARD_PROFILES),
+        default=None,
+        help="Defaults to v2; v3 is auto-selected when --curriculum-stage is given.",
+    )
+    parser.add_argument(
+        "--curriculum-stage",
+        choices=CURRICULUM_STAGES,
+        default=None,
+        help="Spawn Phase 5 opponents per CURRICULUM_OPPONENTS[stage].",
+    )
     parser.add_argument(
         "--tracks",
         nargs="+",
@@ -191,6 +226,8 @@ def parse_args(argv=None):
     parser.add_argument("--max-episode-steps", type=int, default=6000)
     parser.add_argument("--output", type=Path, help="Optional JSON result path")
     args = parser.parse_args(argv)
+    if args.reward_profile is None:
+        args.reward_profile = "v3" if args.curriculum_stage else "v2"
     if args.episodes < 1 or args.max_episode_steps < 1:
         parser.error("episodes and max-episode-steps must be positive")
     if "held-out" in args.tracks:
@@ -209,6 +246,7 @@ def main(argv=None):
         episodes=args.episodes,
         seed=args.seed,
         max_episode_steps=args.max_episode_steps,
+        curriculum_stage=args.curriculum_stage,
     )
     rendered = json.dumps(summary, indent=2)
     print(rendered)

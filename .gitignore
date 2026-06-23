@@ -10,7 +10,7 @@ build/
 # Virtual environments
 venv/
 .venv/
-env/
+/env/
 
 # IDE
 .vscode/
@@ -41,6 +41,9 @@ models/phase3_test_final.zip
 models/phase*/**/*_steps.zip
 models/phase3/**/best_model.zip
 models/phase4/**/*_final.zip
+models/phase5/**/*_final.zip
+models/phase5/**/best_model.zip
+logs/phase5/
 results/*_quick.json
 results/*_preflight.json
 results/*.stdout

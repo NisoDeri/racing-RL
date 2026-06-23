@@ -28,6 +28,7 @@ class RaceConfig:
     static_control_spawn_ahead: float = 10.0  # meters ahead of start line (along track direction)
     startup_collision_grace_steps: int = 3     # ignore car-car counts for first N physics steps
     min_safe_spawn_gap: float = 6.5            # hard floor to reduce overlap on spawn
+    curriculum_min_opponent_gap: float = 25.0  # minimum meters between consecutive opponent spawn offsets
 
 
 @dataclass
