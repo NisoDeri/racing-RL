@@ -4,6 +4,25 @@ This document is the team's working plan for the RL portion of the project. It a
 
 Every methodology choice in this plan is tied to a specific course lecture (1–14). The mapping is in the **Sources** section at the bottom — when we write the report, the Methodology section will literally cite these slides.
 
+## Completion status (as of 2026-06-23, seed 42)
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 1 | RL contract (obs/action/reward) | ✓ complete |
+| 2 | PPO baseline on Sprint Circuit | ✓ complete |
+| 3 | Reward shaping iteration | ✓ complete (3 seeds) |
+| 4 | Domain randomization + held-out eval | ✓ complete (3 seeds, 5M steps each) |
+| 5 | Multi-car curriculum (5b→5c→5d) | ✓ seed 42 complete |
+| 6 | Self-play opponent pool | ✓ implemented as **Phase 5e** (see note below) |
+| 7 | Advanced techniques | pending |
+| 8 | SAC comparison | pending |
+| 9 | Final evaluation protocol | pending |
+| 10 | Report + presentation | pending |
+
+> **Phase 5e = Phase 6.** The AlphaZero-style checkpoint pool self-play described in Phase 6 was implemented as the final curriculum stage `5e`, keeping the warm-start chain (5d → 5e) intact. The implementation is identical to the Phase 6 spec: 200k-step snapshots, 10-snapshot rolling pool, physics-driven `PolicyOpponent` with its own raycast sensors. Best model: `models/phase5/v3/seed42/5e_v3_seed42/best_model.zip` (val reward 11,217 at 1.25M/3M steps).
+
+---
+
 ---
 
 ## 0. Quick orientation (read before starting)
@@ -156,7 +175,7 @@ Re-train from scratch with the same PPO config from Phase 2, but `n_envs=8` para
 
 ---
 
-## Phase 5 — Curriculum learning (multi-car ramp-up)
+## Phase 5 — Curriculum learning (multi-car ramp-up) ✓ COMPLETE (seed 42)
 
 **Goal:** dropping the agent into a 20-car race from day one will fail. Phase the difficulty.
 
@@ -174,7 +193,7 @@ Initialize each stage from the previous stage's weights (`PPO.load(prev_model)`)
 
 ---
 
-## Phase 6 — Self-play with opponent pool (the AlphaZero trick)
+## Phase 6 — Self-play with opponent pool (the AlphaZero trick) ✓ COMPLETE as Phase 5e (seed 42)
 
 **Goal:** opponents that learn alongside the agent create a non-stationary environment. Training against a *pool* of past versions of yourself stabilizes this.
 
