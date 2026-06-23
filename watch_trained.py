@@ -12,6 +12,9 @@ Run after training:
     # Match an exact curriculum stage's opponent population
     python watch_trained.py models/5c_v3_seed42_best.zip --curriculum-stage 5c
 
+    # Phase 5e self-play opponents from checkpoint pool
+    python watch_trained.py models/5e_v3_seed42_best.zip --curriculum-stage 5e --pool-dir models/phase5/pool/seed42
+
     # Ad-hoc: race against N centerline followers (50% target speed, 40m apart)
     python watch_trained.py models/5d_v3_seed42_best.zip --track grand-prix --opponents 3
 """
@@ -78,9 +81,16 @@ def parse_args():
             "Mutually exclusive with --curriculum-stage."
         ),
     )
+    parser.add_argument(
+        "--pool-dir",
+        default="",
+        help="Path to checkpoint pool directory (required for --curriculum-stage 5e).",
+    )
     args = parser.parse_args()
     if args.opponents is not None and args.opponents < 0:
         parser.error("--opponents must be >= 0")
+    if args.curriculum_stage == "5e" and not args.pool_dir:
+        parser.error("--pool-dir is required for --curriculum-stage 5e")
     return args
 
 
@@ -102,6 +112,7 @@ def main():
             track_creator=lambda: create_held_out_track(args.track),
             max_episode_steps=6000,
             opponent_spec=opponent_spec,
+            pool_dir=args.pool_dir,
         )
 
     print(f"Loading model: {args.model}")
