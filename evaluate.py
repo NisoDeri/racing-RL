@@ -4,6 +4,8 @@ import argparse
 from collections import Counter
 import json
 from pathlib import Path
+import sys
+import time
 
 import numpy as np
 from stable_baselines3 import PPO
@@ -71,6 +73,10 @@ def _summarize_results(results):
     }
 
 
+def _log(msg):
+    print(msg, file=sys.stderr, flush=True)
+
+
 def _evaluate_track(
     model,
     track_id,
@@ -79,6 +85,9 @@ def _evaluate_track(
     seed,
     max_episode_steps,
     curriculum_stage=None,
+    pool_dir=None,
+    track_index=0,
+    total_tracks=1,
 ):
     opponent_spec = (
         CURRICULUM_OPPONENTS[curriculum_stage] if curriculum_stage else None
@@ -92,12 +101,15 @@ def _evaluate_track(
             max_episode_steps=max_episode_steps,
             reward_profile=reward_profile,
             opponent_spec=opponent_spec,
+            pool_dir=pool_dir or "",
         )
 
     env = VecFrameStack(DummyVecEnv([make_env]), n_stack=N_STACK)
     env.seed(seed)
     obs = env.reset()
     results = []
+    track_start = time.monotonic()
+    _log(f"[{track_index}/{total_tracks}] {track_id}  (0/{episodes})")
 
     try:
         for episode_index in range(episodes):
@@ -116,6 +128,16 @@ def _evaluate_track(
                 heading_errors.append(abs(info["e_psi"]))
 
                 if dones[0]:
+                    ep_laps = int(info["laps"])
+                    ep_hits = int(info["wall_hits"])
+                    ep_reason = info["termination_reason"]
+                    elapsed = time.monotonic() - track_start
+                    _log(
+                        f"[{track_index}/{total_tracks}] {track_id} "
+                        f"ep {episode_index + 1:>3}/{episodes}  "
+                        f"laps={ep_laps}  wall_hits={ep_hits:>3}  "
+                        f"reason={ep_reason:<16}  elapsed={elapsed:.0f}s"
+                    )
                     results.append(
                         {
                             "episode": episode_index + 1,
@@ -168,12 +190,14 @@ def evaluate(
     seed,
     max_episode_steps,
     curriculum_stage=None,
+    pool_dir=None,
 ):
     model_path = _resolve_model_path(model_path)
     model = PPO.load(model_path, device="cpu")
     tracks = {}
     all_results = []
 
+    _log(f"Evaluating {len(track_ids)} track(s) × {episodes} episodes each")
     for track_index, track_id in enumerate(track_ids):
         track_summary = _evaluate_track(
             model=model,
@@ -183,6 +207,9 @@ def evaluate(
             seed=seed + track_index,
             max_episode_steps=max_episode_steps,
             curriculum_stage=curriculum_stage,
+            pool_dir=pool_dir,
+            track_index=track_index + 1,
+            total_tracks=len(track_ids),
         )
         tracks[track_id] = track_summary
         all_results.extend(track_summary["episode_results"])
@@ -191,6 +218,7 @@ def evaluate(
         "model": str(model_path),
         "reward_profile": reward_profile,
         "curriculum_stage": curriculum_stage,
+        "pool_dir": pool_dir,
         "seed": seed,
         "episodes_per_track": episodes,
         "track_ids": list(track_ids),
@@ -225,6 +253,12 @@ def parse_args(argv=None):
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--max-episode-steps", type=int, default=6000)
     parser.add_argument("--output", type=Path, help="Optional JSON result path")
+    parser.add_argument(
+        "--pool-dir",
+        type=str,
+        default=None,
+        help="Checkpoint pool directory for stage 5e evaluation.",
+    )
     args = parser.parse_args(argv)
     if args.reward_profile is None:
         args.reward_profile = "v3" if args.curriculum_stage else "v2"
@@ -247,6 +281,7 @@ def main(argv=None):
         seed=args.seed,
         max_episode_steps=args.max_episode_steps,
         curriculum_stage=args.curriculum_stage,
+        pool_dir=args.pool_dir,
     )
     rendered = json.dumps(summary, indent=2)
     print(rendered)

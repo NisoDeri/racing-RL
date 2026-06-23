@@ -43,6 +43,7 @@ models/phase3/**/best_model.zip
 models/phase4/**/*_final.zip
 models/phase5/**/*_final.zip
 models/phase5/**/best_model.zip
+models/phase5/pool/
 logs/phase5/
 results/*_quick.json
 results/*_preflight.json

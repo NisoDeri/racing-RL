@@ -39,6 +39,7 @@ from src.track.random_track import (
 )
 from src.env.racing_env import REWARD_PROFILES, RacingEnv
 from src.env.opponents import CURRICULUM_OPPONENTS, CURRICULUM_STAGES
+from src.env.pool import CheckpointPool
 
 
 # ============================================================
@@ -77,6 +78,7 @@ def make_env(
     reward_profile="v2",
     max_episode_steps=6000,
     curriculum_stage=None,
+    pool_dir="",
 ):
     opponent_spec = (
         CURRICULUM_OPPONENTS[curriculum_stage] if curriculum_stage else None
@@ -95,6 +97,7 @@ def make_env(
             max_episode_steps=max_episode_steps,
             reward_profile=reward_profile,
             opponent_spec=opponent_spec,
+            pool_dir=pool_dir,
             **track_kwargs,
         )
         return env
@@ -188,6 +191,37 @@ class RacingMetricsCallback(BaseCallback):
         return True
 
 
+class PoolSnapshotCallback(BaseCallback):
+    """Periodically snapshots the current policy into the checkpoint pool.
+
+    New snapshot files become visible to SubprocVecEnv workers at their next
+    episode reset (workers re-glob the pool directory on each reset()).
+
+    TensorBoard keys:
+        pool/pool_size      — number of snapshots currently in the pool
+        pool/mean_age_steps — mean training step of all snapshots
+        pool/oldest_step    — step number of the oldest snapshot
+        pool/newest_step    — step number of the newest snapshot
+    """
+
+    def __init__(self, pool: CheckpointPool, snapshot_freq: int) -> None:
+        super().__init__()
+        self.pool = pool
+        self.snapshot_freq = snapshot_freq
+        self._last_snapshot = 0
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_snapshot >= self.snapshot_freq:
+            self.pool.add(self.model, self.num_timesteps)
+            self._last_snapshot = self.num_timesteps
+            self.logger.record("pool/pool_size", self.pool.size())
+            steps = self.pool.snapshot_steps()
+            self.logger.record("pool/mean_age_steps", float(np.mean(steps)))
+            self.logger.record("pool/oldest_step", int(min(steps)))
+            self.logger.record("pool/newest_step", int(max(steps)))
+        return True
+
+
 def _default_batch_size(rollout_size):
     target = min(512, max(2, rollout_size // 8))
     for candidate in (512, 256, 128, 64, 32, 16, 8, 4, 2):
@@ -242,6 +276,19 @@ def parse_args(argv=None):
     parser.add_argument("--model-dir", default="models")
     parser.add_argument("--run-name")
     parser.add_argument("--no-progress-bar", action="store_true")
+    parser.add_argument(
+        "--pool-dir",
+        type=str,
+        default=None,
+        help="Checkpoint pool directory for stage 5e self-play (required when "
+        "--curriculum-stage 5e).",
+    )
+    parser.add_argument(
+        "--snapshot-freq",
+        type=int,
+        default=200_000,
+        help="Steps between pool snapshots (default 200 000).",
+    )
     args = parser.parse_args(argv)
 
     if args.reward_profile is None:
@@ -278,6 +325,25 @@ def main(argv=None):
 
     curriculum_label = args.curriculum_stage or "none"
     checkpoint_label = args.load_checkpoint or "none"
+    pool_dir = args.pool_dir or ""
+
+    # Bootstrap pool before building envs so subprocesses find it non-empty.
+    pool = None
+    if args.curriculum_stage == "5e":
+        if not pool_dir:
+            raise ValueError("--pool-dir is required when --curriculum-stage 5e")
+        pool = CheckpointPool(pool_dir)
+        if pool.size() == 0 and args.load_checkpoint:
+            checkpoint_path = args.load_checkpoint
+            if not os.path.exists(checkpoint_path) and not checkpoint_path.endswith(".zip"):
+                checkpoint_path = checkpoint_path + ".zip"
+            pool.add_from_path(checkpoint_path, step=0)
+            print(f"Bootstrapped pool with {checkpoint_path} (pool size: {pool.size()})")
+        elif pool.size() == 0:
+            raise ValueError(
+                "Pool is empty. Provide --load-checkpoint to bootstrap it, "
+                "or add snapshots to --pool-dir manually."
+            )
 
     print("=" * 60)
     print("PPO training")
@@ -292,6 +358,8 @@ def main(argv=None):
     )
     print(f"  Eval track: {eval_label}")
     print(f"  Device    : {args.device}")
+    if pool_dir:
+        print(f"  Pool dir  : {pool_dir} (snapshot_freq={args.snapshot_freq:,})")
     print(f"  Envs      : {args.n_envs} × {vec_cls.__name__}  (frame stack: {N_STACK})")
     print(f"  Batch     : {args.batch_size}  (rollout buffer: {args.n_steps * args.n_envs:,} transitions)")
     print(f"  Timesteps : {args.timesteps:,}")
@@ -307,6 +375,7 @@ def main(argv=None):
             reward_profile=args.reward_profile,
             max_episode_steps=args.max_episode_steps,
             curriculum_stage=args.curriculum_stage,
+            pool_dir=pool_dir,
         ),
         n_envs=args.n_envs,
         seed=args.seed,
@@ -323,6 +392,7 @@ def main(argv=None):
             reward_profile=args.reward_profile,
             max_episode_steps=args.max_episode_steps,
             curriculum_stage=args.curriculum_stage,
+            pool_dir=pool_dir,
         ),
         n_envs=1,
         seed=args.seed + 99,
@@ -382,6 +452,8 @@ def main(argv=None):
             verbose=1,
         ),
     ]
+    if pool is not None:
+        callbacks.append(PoolSnapshotCallback(pool, args.snapshot_freq))
 
     # --- Train ---
     model.learn(

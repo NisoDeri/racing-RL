@@ -38,6 +38,7 @@ from src.env.opponents import (
     CURRICULUM_STAGES,
     Opponent,
     OpponentSpec,
+    PolicyOpponent,
 )
 
 
@@ -118,6 +119,7 @@ class RacingEnv(gym.Env):
         reward_profile=None,
         reward_config=None,
         opponent_spec=None,
+        pool_dir: str = "",
     ):
         """
         Args:
@@ -176,6 +178,7 @@ class RacingEnv(gym.Env):
                     f"{RACE.curriculum_min_opponent_gap} m apart"
                 )
 
+        self.pool_dir = pool_dir
         self.render_mode = render_mode
         self.track_creator = track_creator
         self.track_generator = track_generator
@@ -218,7 +221,7 @@ class RacingEnv(gym.Env):
         self.window_closed = False
         self.inner_boundary = None
         self.outer_boundary = None
-        self.opponents: list[Opponent] = []
+        self.opponents: list = []
 
         self.steps = 0
         self.prev_s = 0.0
@@ -276,6 +279,9 @@ class RacingEnv(gym.Env):
                        is_main_player=True)
 
         self.opponents = self._spawn_opponents(start_s)
+        for opp in self.opponents:
+            if isinstance(opp, PolicyOpponent):
+                opp.reset_obs_buffer()
 
         self.steps = 0
         self.prev_s = start_s
@@ -311,29 +317,53 @@ class RacingEnv(gym.Env):
 
     def _spawn_opponents(self, ego_s):
         """Spawn the curriculum-stage opponents ahead of the ego on the centerline."""
-        opponents: list[Opponent] = []
+        opponents = []
         if self.opponent_spec.count == 0:
             return opponents
 
-        opponent_target_speed = self.opponent_spec.speed_fraction * RACE.static_control_speed
-        for idx, offset in enumerate(self.opponent_spec.spawn_offsets):
-            s_i = (ego_s + offset) % self.track.total_length
-            pos, heading, _ = self.track.get_pose_at_s(s_i)
-            car = Car(
-                self.world,
-                position=(float(pos[0]), float(pos[1])),
-                angle=float(heading),
-                car_id=idx + 1,
-                is_static_control=True,
-            )
-            opponents.append(
-                Opponent(
-                    car=car,
-                    mode=self.opponent_spec.mode,
-                    speed=opponent_target_speed,
-                    initial_s=float(s_i),
+        L = self.track.total_length
+        mode = self.opponent_spec.mode
+
+        if mode == "pool_agent":
+            from src.env.pool import CheckpointPool
+            pool = CheckpointPool(self.pool_dir)
+            models = pool.sample(n=self.opponent_spec.count, device="cpu")
+            for idx, (offset, model) in enumerate(
+                zip(self.opponent_spec.spawn_offsets, models)
+            ):
+                s_i = (ego_s + offset) % L
+                pos, heading, _ = self.track.get_pose_at_s(s_i)
+                car = Car(
+                    self.world,
+                    position=(float(pos[0]), float(pos[1])),
+                    angle=float(heading),
+                    car_id=idx + 1,
+                    is_static_control=False,
                 )
+                opponents.append(PolicyOpponent(car=car, model=model, initial_s=float(s_i)))
+        else:
+            opponent_target_speed = (
+                self.opponent_spec.speed_fraction * RACE.static_control_speed
             )
+            for idx, offset in enumerate(self.opponent_spec.spawn_offsets):
+                s_i = (ego_s + offset) % L
+                pos, heading, _ = self.track.get_pose_at_s(s_i)
+                car = Car(
+                    self.world,
+                    position=(float(pos[0]), float(pos[1])),
+                    angle=float(heading),
+                    car_id=idx + 1,
+                    is_static_control=True,
+                )
+                opponents.append(
+                    Opponent(
+                        car=car,
+                        mode=mode,
+                        speed=opponent_target_speed,
+                        initial_s=float(s_i),
+                    )
+                )
+
         return opponents
 
     def _compute_lead_count(self, ego_s):
@@ -388,8 +418,18 @@ class RacingEnv(gym.Env):
         self.total_abs_steering_change += abs(steering - prev_steering)
         self.car.set_controls(throttle, steering)
 
+        all_cars = [self.car] + [opp.car for opp in self.opponents]
         for opp in self.opponents:
-            opp.update(self.track, SIM.time_step)
+            if isinstance(opp, PolicyOpponent):
+                opp.update(
+                    self.track, SIM.time_step,
+                    inner_boundary=self.inner_boundary,
+                    outer_boundary=self.outer_boundary,
+                    all_cars=all_cars,
+                    raycaster=self.raycaster,
+                )
+            else:
+                opp.update(self.track, SIM.time_step)
 
         self.car.update()
         self.world.step()
