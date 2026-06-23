@@ -39,8 +39,6 @@ class CheckpointPool:
 
     def add(self, model, step: int) -> None:
         """Save a snapshot; evict the oldest if pool exceeds max_size."""
-        from stable_baselines3 import PPO  # local import — pool is optional dep
-
         path = self.pool_dir / f"snapshot_{step:010d}.zip"
         model.save(str(path))
         # Invalidate cache for this path if it was previously loaded.

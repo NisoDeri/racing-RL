@@ -179,6 +179,7 @@ class RacingEnv(gym.Env):
                 )
 
         self.pool_dir = pool_dir
+        self._pool = None  # lazily initialized on first pool_agent reset
         self.render_mode = render_mode
         self.track_creator = track_creator
         self.track_generator = track_generator
@@ -326,8 +327,9 @@ class RacingEnv(gym.Env):
 
         if mode == "pool_agent":
             from src.env.pool import CheckpointPool
-            pool = CheckpointPool(self.pool_dir)
-            models = pool.sample(n=self.opponent_spec.count, device="cpu")
+            if self._pool is None:
+                self._pool = CheckpointPool(self.pool_dir)
+            models = self._pool.sample(n=self.opponent_spec.count, device="cpu")
             for idx, (offset, model) in enumerate(
                 zip(self.opponent_spec.spawn_offsets, models)
             ):
