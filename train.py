@@ -115,7 +115,8 @@ class SyncVecNormalizeCallback(BaseCallback):
 
     def _on_step(self):
         if self._train_vn is not None and self._eval_vn is not None:
-            self._eval_vn.obs_rms = self._train_vn.obs_rms
+            if hasattr(self._train_vn, "obs_rms"):
+                self._eval_vn.obs_rms = self._train_vn.obs_rms
             self._eval_vn.ret_rms = self._train_vn.ret_rms
         return True
 
