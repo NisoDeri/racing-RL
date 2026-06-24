@@ -14,9 +14,9 @@ Every methodology choice in this plan is tied to a specific course lecture (1–
 | 4 | Domain randomization + held-out eval | ✓ complete (3 seeds, 5M steps each) |
 | 5 | Multi-car curriculum (5b→5c→5d) | ✓ seed 42 complete |
 | 6 | Self-play opponent pool | ✓ implemented as **Phase 5e** (see note below) |
-| 7 | Advanced techniques | pending |
-| 8 | SAC comparison | pending |
-| 9 | Final evaluation protocol | pending |
+| 7 | Advanced techniques | 7a/7b/7d tooling implemented; full experiment runs pending |
+| 8 | SAC comparison | tooling implemented; full experiment runs pending |
+| 9 | Final evaluation protocol | tooling implemented; full evaluation runs pending |
 | 10 | Report + presentation | pending |
 
 > **Phase 5e = Phase 6.** The AlphaZero-style checkpoint pool self-play described in Phase 6 was implemented as the final curriculum stage `5e`, keeping the warm-start chain (5d → 5e) intact. The implementation is identical to the Phase 6 spec: 200k-step snapshots, 10-snapshot rolling pool, physics-driven `PolicyOpponent` with its own raycast sensors. Best model: `models/phase5/v3/seed42/5e_v3_seed42/best_model.zip` (val reward 11,217 at 1.25M/3M steps).
@@ -211,11 +211,43 @@ This is the AlphaGo/AlphaZero methodology — explicitly covered in the course's
 
 These are the "depth of exploration" amplifiers. Each one is a separate self-contained experiment with its own ablation. **Pick at least one. Two would be ideal. Three is overkill given the report length cap.**
 
+### Implementation status
+
+Phase 7a/7b/7d are wired into the training/evaluation tooling:
+
+- `train.py --aux-raycast-prediction` uses a PPO policy with an auxiliary
+  next-raycast prediction head and trains it from rollout transitions.
+- `train.py --gae-lambda <value>` runs PPO with a chosen GAE / n-step lambda.
+- `train.py --vec-normalize-reward` enables SB3 `VecNormalize` reward normalization and saves `<run>_final_vecnormalize.pkl`.
+- `evaluate.py --vec-normalize <stats.pkl>` loads saved normalization stats for evaluation.
+- `phase7_ablation.py` builds or executes the full GAE sweep manifest, with optional 7a/7d flags.
+
+Suggested command for the Phase 7b sweep:
+
+```bash
+.venv/bin/python phase7_ablation.py \
+  --gae-values 0.0 0.5 0.9 0.95 1.0 \
+  --seeds 42 43 44 \
+  --track-mode random \
+  --reward-profile v2 \
+  --timesteps 5000000 \
+  --n-envs 8 \
+  --manifest results/phase7_gae_manifest.json
+```
+
+Add `--aux-raycast-prediction` to include Phase 7a, and add
+`--vec-normalize-reward` to combine the sweep with Phase 7d. Add `--execute`
+only when you are ready to launch the training jobs.
+
 ### 7a — Auxiliary tasks (Lecture 14 — the "secret weapon")
 
-Add a second prediction head to the policy network that predicts **the next raycast vector** given the current observation + action. Loss = main RL loss + λ * MSE on the next-raycast prediction.
+Implemented as an opt-in PPO extension:
 
-**Why it helps:** the shared trunk is forced to learn features that are useful for *predicting the world*, not just for the current reward. This yields more transferable representations and noticeably improves zero-shot performance on unseen tracks. The course calls this "general value functions" / "auxiliary tasks." This is also the one experiment where we step outside SB3 — SB3 doesn't expose the architecture cleanly for multi-head output, so this is a custom-PyTorch experiment.
+- `AuxRaycastActorCriticPolicy` adds a second prediction head to the policy network that predicts **the next raycast vector** given the current observation + action.
+- `AuxRaycastPredictionCallback` trains that head from consecutive rollout frames with loss coefficient `--aux-loss-coef`.
+- Use `train.py --aux-raycast-prediction` for a direct run, or add that flag to `phase7_ablation.py` to include it in the GAE sweep.
+
+**Why it helps:** the policy representation is forced to learn features that are useful for *predicting the world*, not just for the current reward. This yields more transferable representations and should improve zero-shot performance on unseen tracks. The course calls this "general value functions" / "auxiliary tasks." The implementation stays SB3-compatible through a custom policy and rollout callback.
 
 → **Lecture 14** (auxiliary tasks, GVFs).
 
@@ -246,6 +278,28 @@ Reward magnitudes shift dramatically across curriculum stages and randomized tra
 ### Recommended: SAC (Soft Actor-Critic)
 
 SAC is the modern improvement on DDPG: it adds entropy regularization to the actor (it gets a bonus for being uncertain, which is the principled answer to "how much should I explore?"). In practice SAC trains more stably than DDPG on continuous control. SB3 has it: `SAC("MlpPolicy", env, ...)`.
+
+### Implementation status
+
+Phase 8 is wired into the tooling:
+
+- `train_sac.py` trains SAC on the same sprint/random track environment contract as PPO.
+- `evaluate.py --algo sac` loads SAC checkpoints and reports the same held-out metrics as PPO.
+- `phase8_compare.py` builds the 3-seed SAC training commands and paired PPO/SAC held-out evaluation commands.
+
+Suggested full comparison command:
+
+```bash
+.venv/bin/python phase8_compare.py \
+  --seeds 42 43 44 \
+  --track-mode random \
+  --reward-profile v2 \
+  --timesteps 5000000 \
+  --n-envs 8 \
+  --manifest results/phase8_manifest.json
+```
+
+Add `--execute` only when ready to launch the training and evaluation commands. For a cheap pre-flight run, lower `--timesteps`, `--buffer-size`, `--learning-starts`, and `--batch-size`.
 
 Train the same way as Phase 4 (5M steps, randomized tracks, 3 seeds). Then compare against PPO on:
 
@@ -289,6 +343,56 @@ For each model (Phase-2 baseline, Phase-4 domain-randomized, Phase-5 multi-agent
 3. Reward-shaping iteration: before/after curves for each fix in Phase 3.
 4. Trajectory overlay: agent path on an unseen track.
 5. Raycast heatmap: average ray distance vs track curvature (sanity check that the agent is using its sensors).
+
+### Implementation status
+
+Phase 9 is wired into the tooling:
+
+- The env now tracks **lap time** (`lap_times`, `mean_lap_time` in `info`,
+  derived from per-lap completion step marks × the 1/60 s physics timestep) and
+  exposes `car_x`/`car_y`, `kappa`, and `ray_mean_distance` for trajectory and
+  raycast analysis.
+- `evaluate.py` aggregates lap time across episodes (`aggregate.lap_time`) and
+  accepts `--record-trajectories N` to dump the first N car paths per track to a
+  `<output>.trajectories.json` sidecar.
+- `phase9_figures.py` renders the report figures from those artifacts via
+  subcommands: `trajectory` (path overlay on a held-out track), `success`
+  (zero-shot lap-success bar chart across model groups), `curves` (learning
+  curves with seed bands from `evaluations.npz`), and `raycast` (mean ray
+  distance vs absolute curvature heatmap). Matplotlib runs headless (`Agg`).
+
+Example figure commands:
+
+```bash
+# Held-out evaluation with trajectory capture (one path per track)
+.venv/bin/python evaluate.py models/phase4/v2/seed42/phase4_v2_seed42/best_model.zip \
+  --tracks held-out --episodes 100 --record-trajectories 1 \
+  --output results/phase9/phase4_v2_seed42_heldout.json
+
+# Trajectory overlay on an unseen track
+.venv/bin/python phase9_figures.py trajectory \
+  results/phase9/phase4_v2_seed42_heldout.trajectories.json \
+  --track grand-prix --out results/phase9/figures/traj_grand-prix.png
+
+# Zero-shot success bar chart (Phase 2 vs Phase 4)
+.venv/bin/python phase9_figures.py success \
+  --group "Phase 4" results/phase4_v2_seed4*_heldout_final.json \
+  --out results/phase9/figures/success.png
+
+# Learning curves with seed bands (PPO)
+.venv/bin/python phase9_figures.py curves \
+  --group PPO logs/phase4/v2/seed4*/phase4_v2_seed4*/evaluations.npz \
+  --out results/phase9/figures/curves.png
+
+# Raycast-vs-curvature heatmap
+.venv/bin/python phase9_figures.py raycast \
+  models/phase4/v2/seed42/phase4_v2_seed42/best_model.zip \
+  --tracks held-out --episodes 5 --out results/phase9/figures/raycast.png
+```
+
+The PPO-vs-SAC learning-curve overlay (figure 1) needs Phase 8 SAC runs; the
+`curves` subcommand already accepts multiple `--group`s for that once SAC logs
+exist. All other figures are produced from the existing PPO artifacts.
 
 ---
 

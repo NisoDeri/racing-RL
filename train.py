@@ -25,7 +25,7 @@ import numpy as np
 from stable_baselines3 import PPO
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import (
-    VecFrameStack, SubprocVecEnv, DummyVecEnv
+    VecFrameStack, SubprocVecEnv, DummyVecEnv, VecNormalize
 )
 from stable_baselines3.common.callbacks import (
     BaseCallback, EvalCallback, CheckpointCallback
@@ -38,6 +38,10 @@ from src.track.random_track import (
     create_validation_track,
 )
 from src.env.racing_env import REWARD_PROFILES, RacingEnv
+from src.rl.auxiliary import (
+    AuxRaycastActorCriticPolicy,
+    AuxRaycastPredictionCallback,
+)
 
 
 # ============================================================
@@ -61,6 +65,8 @@ def _detect_n_envs():
 # ============================================================
 
 N_STACK         = 4           # Frame stacking (gives the agent velocity info)
+DEFAULT_GAMMA   = 0.99
+DEFAULT_GAE_LAMBDA = 0.95
 
 
 # ============================================================
@@ -93,6 +99,26 @@ def make_env(track_mode="sprint", reward_profile="v2", max_episode_steps=6000):
 # ============================================================
 # Custom callback — logs extra metrics SB3 doesn't track by default
 # ============================================================
+
+class SyncVecNormalizeCallback(BaseCallback):
+    """Copy running VecNormalize stats from train_env to eval_env each step.
+
+    Ensures EvalCallback selects the best checkpoint on the same normalized
+    reward scale the policy was trained on, rather than on raw returns.
+    Only added to the callback list when --vec-normalize-reward is active.
+    """
+
+    def __init__(self, train_env, eval_env):
+        super().__init__(verbose=0)
+        self._train_vn = _find_vec_normalize(train_env)
+        self._eval_vn = _find_vec_normalize(eval_env)
+
+    def _on_step(self):
+        if self._train_vn is not None and self._eval_vn is not None:
+            self._eval_vn.obs_rms = self._train_vn.obs_rms
+            self._eval_vn.ret_rms = self._train_vn.ret_rms
+        return True
+
 
 class RacingMetricsCallback(BaseCallback):
     """
@@ -166,6 +192,36 @@ def _default_batch_size(rollout_size):
     return 2
 
 
+def _wrap_vec_env(
+    env,
+    *,
+    vec_normalize_reward=False,
+    gamma=DEFAULT_GAMMA,
+    training=True,
+    frame_stack=True,
+):
+    if vec_normalize_reward:
+        env = VecNormalize(
+            env,
+            norm_obs=False,
+            norm_reward=training,
+            gamma=gamma,
+            training=training,
+        )
+    if frame_stack:
+        env = VecFrameStack(env, n_stack=N_STACK)
+    return env
+
+
+def _find_vec_normalize(env):
+    current = env
+    while current is not None:
+        if isinstance(current, VecNormalize):
+            return current
+        current = getattr(current, "venv", None)
+    return None
+
+
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="Train PPO on Sprint Circuit or randomized tracks."
@@ -185,6 +241,36 @@ def parse_args(argv=None):
     parser.add_argument("--n-steps", type=int, default=2048)
     parser.add_argument("--batch-size", type=int)
     parser.add_argument("--n-epochs", type=int, default=10)
+    parser.add_argument("--gamma", type=float, default=DEFAULT_GAMMA)
+    parser.add_argument("--gae-lambda", type=float, default=DEFAULT_GAE_LAMBDA)
+    parser.add_argument(
+        "--vec-normalize-reward",
+        action="store_true",
+        help="Phase 7d: normalize discounted returns with SB3 VecNormalize.",
+    )
+    parser.add_argument(
+        "--aux-raycast-prediction",
+        action="store_true",
+        help="Phase 7a: add an auxiliary head that predicts the next raycast vector.",
+    )
+    parser.add_argument(
+        "--aux-loss-coef",
+        type=float,
+        default=0.05,
+        help="Weight applied to the auxiliary raycast MSE loss.",
+    )
+    parser.add_argument(
+        "--aux-batch-size",
+        type=int,
+        default=256,
+        help="Mini-batch size for auxiliary raycast updates.",
+    )
+    parser.add_argument(
+        "--aux-gradient-steps",
+        type=int,
+        default=1,
+        help="Auxiliary optimizer passes per PPO rollout.",
+    )
     parser.add_argument("--eval-freq", type=int, default=50_000)
     parser.add_argument("--eval-episodes", type=int, default=5)
     parser.add_argument("--checkpoint-freq", type=int, default=100_000)
@@ -199,6 +285,14 @@ def parse_args(argv=None):
         args.timesteps = 5_000_000 if args.track_mode == "random" else 1_000_000
     if args.n_envs < 1 or args.n_steps < 2 or args.timesteps < 1:
         parser.error("n-envs >= 1, n-steps >= 2, and timesteps >= 1 are required")
+    if not 0.0 <= args.gamma <= 1.0:
+        parser.error("gamma must be in [0, 1]")
+    if not 0.0 <= args.gae_lambda <= 1.0:
+        parser.error("gae-lambda must be in [0, 1]")
+    if args.aux_loss_coef < 0.0:
+        parser.error("aux-loss-coef must be non-negative")
+    if args.aux_batch_size < 1 or args.aux_gradient_steps < 1:
+        parser.error("aux-batch-size and aux-gradient-steps must be positive")
     rollout_size = args.n_envs * args.n_steps
     if args.batch_size is None:
         args.batch_size = _default_batch_size(rollout_size)
@@ -233,6 +327,10 @@ def main(argv=None):
     print(f"  Device    : {args.device}")
     print(f"  Envs      : {args.n_envs} × {vec_cls.__name__}  (frame stack: {N_STACK})")
     print(f"  Batch     : {args.batch_size}  (rollout buffer: {args.n_steps * args.n_envs:,} transitions)")
+    print(f"  Gamma/GAE : gamma={args.gamma:.3f}, lambda={args.gae_lambda:.3f}")
+    print(f"  Normalize : reward={'yes' if args.vec_normalize_reward else 'no'}")
+    aux_label = "yes" if args.aux_raycast_prediction else "no"
+    print(f"  Auxiliary : next-raycast prediction={aux_label}")
     print(f"  Timesteps : {args.timesteps:,}")
     print(f"  Logs      : {args.log_dir}  →  tensorboard --logdir {args.log_dir}")
     print("=" * 60)
@@ -250,7 +348,11 @@ def main(argv=None):
         seed=args.seed,
         vec_env_cls=vec_cls,
     )
-    train_env = VecFrameStack(train_env, n_stack=N_STACK)
+    train_env = _wrap_vec_env(
+        train_env,
+        vec_normalize_reward=args.vec_normalize_reward,
+        gamma=args.gamma,
+    )
 
     # Use a reserved validation track for model selection. Final held-out tracks
     # are evaluated only after training via evaluate.py.
@@ -265,18 +367,28 @@ def main(argv=None):
         seed=args.seed + 99,
         vec_env_cls=DummyVecEnv,
     )
-    eval_env = VecFrameStack(eval_env, n_stack=N_STACK)
+    eval_env = _wrap_vec_env(
+        eval_env,
+        vec_normalize_reward=args.vec_normalize_reward,
+        gamma=args.gamma,
+        training=False,
+    )
 
     # --- PPO ---
+    policy = (
+        AuxRaycastActorCriticPolicy
+        if args.aux_raycast_prediction
+        else "MlpPolicy"
+    )
     model = PPO(
-        "MlpPolicy",
+        policy,
         train_env,
         policy_kwargs=dict(net_arch=[256, 256]),
         n_steps=args.n_steps,
         batch_size=args.batch_size,
         n_epochs=args.n_epochs,
-        gamma=0.99,
-        gae_lambda=0.95,
+        gamma=args.gamma,
+        gae_lambda=args.gae_lambda,
         clip_range=0.2,
         ent_coef=0.01,
         learning_rate=3e-4,
@@ -304,6 +416,17 @@ def main(argv=None):
             verbose=1,
         ),
     ]
+    if args.vec_normalize_reward:
+        callbacks.insert(0, SyncVecNormalizeCallback(train_env, eval_env))
+    if args.aux_raycast_prediction:
+        callbacks.insert(
+            1,
+            AuxRaycastPredictionCallback(
+                loss_coef=args.aux_loss_coef,
+                batch_size=args.aux_batch_size,
+                gradient_steps=args.aux_gradient_steps,
+            ),
+        )
 
     # --- Train ---
     model.learn(
@@ -315,6 +438,11 @@ def main(argv=None):
     final_path = os.path.join(args.model_dir, f"{args.run_name}_final")
     model.save(final_path)
     print(f"\nTraining complete. Final model saved to {final_path}.zip")
+    vec_normalize = _find_vec_normalize(train_env)
+    if vec_normalize is not None:
+        stats_path = f"{final_path}_vecnormalize.pkl"
+        vec_normalize.save(stats_path)
+        print(f"VecNormalize stats saved to {stats_path}")
 
     train_env.close()
     eval_env.close()

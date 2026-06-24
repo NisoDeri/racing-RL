@@ -31,6 +31,8 @@ from src.physics.car import Car
 from src.track.track import Track
 from src.rendering.renderer import Renderer
 from src.sensors.sensor import RayCaster
+from src.env.opponents import Opponent, OpponentSpec, PolicyOpponent
+from src.env.pool import CheckpointPool
 
 
 _SPEED_NORM = 95.0
@@ -50,6 +52,8 @@ class RewardConfig:
     off_track_penalty: float = 50.0
     time_penalty: float = 0.0
     wall_contact_penalty: float = 0.0
+    car_hit_penalty: float = 0.0
+    car_contact_penalty: float = 0.0
     backwards_terminal_penalty: float = 0.0
     forward_speed_only: bool = False
     reward_while_touching_wall: bool = True
@@ -64,6 +68,16 @@ REWARD_PROFILES = {
     "v2": RewardConfig(
         time_penalty=0.001,
         wall_contact_penalty=0.25,
+        backwards_terminal_penalty=25.0,
+        forward_speed_only=True,
+        reward_while_touching_wall=False,
+        max_backwards_steps=120,
+    ),
+    # Phase 5: v2 shaping plus car-aware contact cost for multi-car racing.
+    "v3": RewardConfig(
+        time_penalty=0.001,
+        wall_contact_penalty=0.25,
+        car_contact_penalty=2.0,
         backwards_terminal_penalty=25.0,
         forward_speed_only=True,
         reward_while_touching_wall=False,
@@ -93,6 +107,9 @@ class RacingEnv(gym.Env):
         max_episode_steps=6000,
         reward_profile=None,
         reward_config=None,
+        opponent_spec=None,
+        pool_dir=None,
+        pool_device="cpu",
     ):
         """
         Args:
@@ -110,6 +127,9 @@ class RacingEnv(gym.Env):
             reward_profile: Named reward configuration ("v1" or "v2"). Defaults
                 to the Phase 3 "v2" profile.
             reward_config: Optional RewardConfig override for experiments/tests.
+            opponent_spec: Optional OpponentSpec for Phase 5 multi-car curricula.
+            pool_dir: Checkpoint directory for "pool_agent" opponents.
+            pool_device: Device used when loading pooled PPO checkpoint opponents.
         """
         super().__init__()
 
@@ -145,6 +165,22 @@ class RacingEnv(gym.Env):
         self.start_lateral_jitter = start_lateral_jitter
         self.start_heading_jitter = start_heading_jitter
         self.max_episode_steps = max_episode_steps
+        if opponent_spec is not None and not isinstance(opponent_spec, OpponentSpec):
+            raise TypeError("opponent_spec must be an OpponentSpec")
+        if (
+            opponent_spec is not None
+            and opponent_spec.mode == "pool_agent"
+            and pool_dir is None
+        ):
+            raise ValueError("pool_dir is required for pool_agent opponents")
+        self.opponent_spec = opponent_spec
+        self.pool_dir = pool_dir
+        self.pool_device = pool_device
+        self.checkpoint_pool = (
+            CheckpointPool(pool_dir)
+            if opponent_spec is not None and opponent_spec.mode == "pool_agent"
+            else None
+        )
 
         self.raycaster = RayCaster(
             num_forward_rays=SENSOR.num_forward_rays,
@@ -180,15 +216,21 @@ class RacingEnv(gym.Env):
         self.window_closed = False
         self.inner_boundary = None
         self.outer_boundary = None
+        self.opponents = []
 
         self.steps = 0
         self.prev_s = 0.0
+        self.prev_lead_count = 0
+        self.overtake_count = 0
+        self.car_contact_steps = 0
         self.total_progress = 0.0
         self.laps_completed = 0
+        self.lap_step_marks = []
         self.last_throttle = 0.0
         self.last_steering = 0.0
         self.prev_steering = 0.0
         self.prev_wall_hits = 0
+        self.prev_car_collisions = 0
         self.stuck_wall_steps = 0
         self.backwards_steps = 0
         self.total_abs_steering_change = 0.0
@@ -198,6 +240,8 @@ class RacingEnv(gym.Env):
         self.last_ray_hits = None
         self.last_reward_terms = {}
         self.last_wall_hit_this_step = False
+        self._cached_frenet = None
+        self._cached_on_track = True
 
     def reset(self, seed=None, options=None):
         """
@@ -229,15 +273,21 @@ class RacingEnv(gym.Env):
         start_pos = start_pos + self.track.normals[start_segment] * lateral_offset
         start_heading += heading_offset
         self.car = Car(self.world, position=start_pos, angle=start_heading)
+        self.opponents = self._spawn_opponents(start_s)
 
         self.steps = 0
         self.prev_s = start_s
+        self.prev_lead_count = self._compute_lead_count(start_s)
+        self.overtake_count = 0
+        self.car_contact_steps = 0
         self.total_progress = 0.0
         self.laps_completed = 0
+        self.lap_step_marks = []
         self.last_throttle = 0.0
         self.last_steering = 0.0
         self.prev_steering = 0.0
         self.prev_wall_hits = 0
+        self.prev_car_collisions = 0
         self.stuck_wall_steps = 0
         self.backwards_steps = 0
         self.total_abs_steering_change = 0.0
@@ -247,6 +297,10 @@ class RacingEnv(gym.Env):
         self.episode_start_heading_offset = heading_offset
         self.last_reward_terms = {}
         self.last_wall_hit_this_step = False
+        self._cached_frenet = self.track.get_frenet_coordinates(
+            self.car.position, self.car.angle
+        )
+        self._cached_on_track = self.track.is_inside_track(self.car.position)
 
         obs = self._get_observation()
         info = self._get_info()
@@ -256,6 +310,69 @@ class RacingEnv(gym.Env):
             self.render()
 
         return obs, info
+
+    def _spawn_opponents(self, start_s):
+        spec = self.opponent_spec
+        if spec is None or spec.count == 0:
+            return []
+        if spec.mode == "pool_agent":
+            if self.checkpoint_pool is None:
+                raise ValueError("pool_dir is required for pool_agent opponents")
+            models = self.checkpoint_pool.sample(spec.count, device=self.pool_device)
+        else:
+            models = [None] * spec.count
+
+        opponents = []
+        speed = spec.speed_fraction * RACE.static_control_speed
+        for index, (offset, model) in enumerate(zip(spec.spawn_offsets, models), start=1):
+            opp_s = (start_s + offset) % self.track.total_length
+            pos, heading, _ = self.track.get_pose_at_s(opp_s)
+            car = Car(
+                self.world,
+                position=pos,
+                angle=heading,
+                car_id=index,
+                is_static_control=(spec.mode != "pool_agent"),
+            )
+            if spec.mode == "pool_agent":
+                opponent = PolicyOpponent(car, model, opp_s)
+                opponent.reset_obs_buffer()
+            else:
+                opponent = Opponent(car, spec.mode, speed, opp_s)
+            opponents.append(opponent)
+        return opponents
+
+    def _all_cars(self):
+        cars = [self.car] if self.car is not None else []
+        cars.extend(opp.car for opp in self.opponents)
+        return cars
+
+    def _update_opponents(self):
+        for opponent in self.opponents:
+            if isinstance(opponent, PolicyOpponent):
+                opponent.update(
+                    self.track,
+                    SIM.time_step,
+                    inner_boundary=self.inner_boundary,
+                    outer_boundary=self.outer_boundary,
+                    all_cars=self._all_cars(),
+                    raycaster=self.raycaster,
+                )
+            else:
+                opponent.update(self.track, SIM.time_step)
+
+    def _snap_kinematic_opponents(self):
+        for opponent in self.opponents:
+            if not isinstance(opponent, PolicyOpponent):
+                opponent.update(self.track, 0.0)
+
+    def _compute_lead_count(self, ego_s):
+        lead_count = 0
+        for opponent in self.opponents:
+            delta = (ego_s - opponent.s) % self.track.total_length
+            if 0.0 < delta < self.track.total_length / 2:
+                lead_count += 1
+        return lead_count
 
     def _get_start_state(self, options):
         options = options or {}
@@ -297,16 +414,25 @@ class RacingEnv(gym.Env):
         self.car.set_controls(throttle, steering)
 
         self.car.update()
+        self._update_opponents()
         self.world.step()
+        self._snap_kinematic_opponents()
         self.steps += 1
 
         frenet = self.track.get_frenet_coordinates(self.car.position, self.car.angle)
         on_track = self.track.is_inside_track(self.car.position)
+        self._cached_frenet = frenet
+        self._cached_on_track = on_track
         ds = self._compute_progress_delta(frenet['s'])
+        lead_count = self._compute_lead_count(frenet['s'])
+        if lead_count > self.prev_lead_count:
+            self.overtake_count += lead_count - self.prev_lead_count
+        self.prev_lead_count = lead_count
 
         self.total_progress += ds
         if self.total_progress >= self.track.total_length * (self.laps_completed + 1):
             self.laps_completed += 1
+            self.lap_step_marks.append(self.steps)
         self.prev_s = frenet['s']
 
         wall_stats = self.world.collision_handler.get_car_stats(self.car.car_id)
@@ -314,6 +440,12 @@ class RacingEnv(gym.Env):
         new_wall_hits = max(0, wall_hits - self.prev_wall_hits)
         self.prev_wall_hits = wall_hits
         self.last_wall_hit_this_step = new_wall_hits > 0
+        car_collisions = int(wall_stats['car_collision_count'])
+        new_car_collisions = max(0, car_collisions - self.prev_car_collisions)
+        self.prev_car_collisions = car_collisions
+        touching_car = bool(wall_stats['touching_car'])
+        if touching_car:
+            self.car_contact_steps += 1
 
         if ds < self.reward_config.backwards_progress_threshold:
             self.backwards_steps += 1
@@ -333,6 +465,8 @@ class RacingEnv(gym.Env):
             prev_steering=prev_steering,
             new_wall_hits=new_wall_hits,
             touching_wall=bool(wall_stats['touching_wall']),
+            new_car_collisions=new_car_collisions,
+            touching_car=touching_car,
             backwards_terminated=backwards_terminated,
         )
         self.last_reward_terms = reward_terms
@@ -396,6 +530,8 @@ class RacingEnv(gym.Env):
             self.car.angle,
             self.inner_boundary,
             self.outer_boundary,
+            cars=self._all_cars() if SENSOR.detect_cars_as_obstacles else None,
+            ego_car=self.car,
         )
         self.last_ray_distances = distances
         self.last_ray_hits = hit_points
@@ -423,7 +559,9 @@ class RacingEnv(gym.Env):
         prev_steering,
         new_wall_hits,
         touching_wall,
-        backwards_terminated,
+        new_car_collisions=0,
+        touching_car=False,
+        backwards_terminated=False,
     ):
         config = self.reward_config
         clean_driving = on_track and (
@@ -449,6 +587,8 @@ class RacingEnv(gym.Env):
         wall_contact_penalty = (
             -config.wall_contact_penalty if touching_wall else 0.0
         )
+        car_hit_penalty = -config.car_hit_penalty * new_car_collisions
+        car_contact_penalty = -config.car_contact_penalty if touching_car else 0.0
         time_penalty = -config.time_penalty
         off_track_penalty = -config.off_track_penalty if not on_track else 0.0
         backwards_penalty = (
@@ -463,6 +603,8 @@ class RacingEnv(gym.Env):
             'steering_smoothness': float(steering_penalty),
             'wall_hit': float(wall_penalty),
             'wall_contact': float(wall_contact_penalty),
+            'car_hit': float(car_hit_penalty),
+            'car_contact': float(car_contact_penalty),
             'time': float(time_penalty),
             'off_track': float(off_track_penalty),
             'backwards': float(backwards_penalty),
@@ -470,31 +612,74 @@ class RacingEnv(gym.Env):
 
         return float(sum(reward_terms.values())), reward_terms
 
+    def _lap_times(self):
+        """Per-lap durations in seconds, derived from completion step marks.
+
+        One env step advances the physics by ``SIM.time_step`` seconds, so a
+        lap's duration is the number of steps between consecutive completions
+        times the physics timestep. The first lap is timed from episode start.
+        """
+        previous = 0
+        times = []
+        for mark in self.lap_step_marks:
+            times.append(float((mark - previous) * SIM.time_step))
+            previous = mark
+        return times
+
+    def _mean_lap_time(self):
+        """Mean completed-lap time in seconds, or ``None`` if no lap finished."""
+        times = self._lap_times()
+        if not times:
+            return None
+        return float(np.mean(times))
+
     def _get_info(self):
         """Return additional info dict."""
-        frenet = self.track.get_frenet_coordinates(self.car.position, self.car.angle)
+        frenet = self._cached_frenet
         wall_stats = self.world.collision_handler.get_car_stats(self.car.car_id)
+        ray_distances = self.last_ray_distances
         ray_min_distance = (
-            float(np.min(self.last_ray_distances))
-            if self.last_ray_distances is not None
+            float(np.min(ray_distances))
+            if ray_distances is not None
             else SENSOR.max_ray_distance
         )
+        ray_mean_distance = (
+            float(np.mean(ray_distances))
+            if ray_distances is not None
+            else SENSOR.max_ray_distance
+        )
+        lap_times = self._lap_times()
+        mean_lap_time = float(np.mean(lap_times)) if lap_times else None
 
         return {
             'speed': float(self.car.speed),
+            'car_x': float(self.car.position[0]),
+            'car_y': float(self.car.position[1]),
             'forward_velocity': float(self.car.get_forward_velocity()),
             'speed_kmh': float(self.car.speed * 3.6),
             's': float(frenet['s']),
             'e_y': float(frenet['e_y']),
             'e_psi': float(frenet['e_psi']),
+            'kappa': float(frenet['kappa']),
             'steps': int(self.steps),
-            'on_track': bool(self.track.is_inside_track(self.car.position)),
+            'on_track': bool(self._cached_on_track),
             'laps': int(self.laps_completed),
+            'lap_times': lap_times,
+            'mean_lap_time': mean_lap_time,
             'total_progress': float(self.total_progress),
             'progress_fraction': float(self.total_progress / self.track.total_length),
             'wall_hits': int(wall_stats['wall_hit_count']),
             'wall_hit_this_step': bool(self.last_wall_hit_this_step),
+            'touching_car': bool(wall_stats['touching_car']),
+            'car_collisions': int(wall_stats['car_collision_count']),
+            'car_contact_steps': int(self.car_contact_steps),
+            'overtake_count': int(self.overtake_count),
+            'num_opponents': len(self.opponents),
+            'opponent_mode': (
+                self.opponent_spec.mode if self.opponent_spec is not None else None
+            ),
             'ray_min_distance': ray_min_distance,
+            'ray_mean_distance': ray_mean_distance,
             'lateral_velocity': float(self.car.get_lateral_velocity()),
             'last_throttle': float(self.last_throttle),
             'last_steering': float(self.last_steering),
