@@ -551,6 +551,8 @@ class RacingEnv(gym.Env):
         self.renderer.set_camera(self.car.position[0], self.car.position[1])
         self.renderer.clear()
         self.renderer.draw_track(self.track)
+        for opp in self.opponents:
+            self.renderer.draw_car(opp.car)
         self.renderer.draw_car(self.car)
 
         if self.last_ray_distances is not None and self.last_ray_hits is not None:
