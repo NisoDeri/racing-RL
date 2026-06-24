@@ -14,5 +14,8 @@ gymnasium>=0.29.0
 stable-baselines3>=2.1.0
 tensorboard>=2.15.0
 
+# Phase 9 report figures
+matplotlib>=3.7.0
+
 # Testing
 pytest>=8.0.0

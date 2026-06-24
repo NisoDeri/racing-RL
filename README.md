@@ -12,7 +12,11 @@ University project — the goal is to train RL agents (PPO, SAC) that learn to d
 f1/
 ├── main.py                  # Interactive demo (keyboard-controlled driving)
 ├── train.py                 # PPO fixed/random-track training runner
+├── train_sac.py             # SAC runner for Phase 8 PPO-vs-SAC comparison
 ├── evaluate.py              # Held-out track metrics and JSON output
+├── phase7_ablation.py       # Phase 7 GAE / auxiliary / normalization command builder
+├── phase8_compare.py        # Phase 8 PPO-vs-SAC command builder
+├── phase9_figures.py        # Phase 9 report figure generators (trajectory/success/curves/raycast)
 ├── config.py                # All tunable parameters (physics, car, track, sensors, rendering)
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
@@ -107,13 +111,93 @@ protections. Use distinct run names so ablation outputs never overwrite each oth
 .venv/bin/python train.py --track-mode random --reward-profile v2 \
   --timesteps 5000000 --n-envs 8 --seed 42 --run-name ppo_random_v2_seed42
 
+# Phase 7a: PPO plus auxiliary next-raycast prediction
+.venv/bin/python train.py --track-mode random --reward-profile v2 \
+  --timesteps 5000000 --n-envs 8 --seed 42 \
+  --aux-raycast-prediction --aux-loss-coef 0.05 \
+  --run-name ppo_random_v2_seed42_auxray
+
+# Phase 7b: build the GAE / n-step ablation commands
+.venv/bin/python phase7_ablation.py \
+  --gae-values 0.0 0.5 0.9 0.95 1.0 \
+  --seeds 42 43 44 \
+  --track-mode random \
+  --reward-profile v2 \
+  --timesteps 5000000 \
+  --n-envs 8 \
+  --manifest results/phase7_gae_manifest.json
+
+# Add reward normalization from Phase 7d; omit --execute to print commands only
+.venv/bin/python phase7_ablation.py \
+  --gae-values 0.0 0.5 0.9 0.95 1.0 \
+  --seeds 42 43 44 \
+  --track-mode random \
+  --reward-profile v2 \
+  --timesteps 5000000 \
+  --n-envs 8 \
+  --vec-normalize-reward \
+  --execute
+
+# Combine Phase 7a/7b/7d in one ablation manifest
+.venv/bin/python phase7_ablation.py \
+  --gae-values 0.0 0.5 0.9 0.95 1.0 \
+  --seeds 42 43 44 \
+  --track-mode random \
+  --reward-profile v2 \
+  --timesteps 5000000 \
+  --n-envs 8 \
+  --aux-raycast-prediction \
+  --vec-normalize-reward \
+  --manifest results/phase7_aux_gae_norm_manifest.json
+
+# Phase 8: train SAC as the PPO comparison algorithm
+.venv/bin/python train_sac.py --track-mode random --reward-profile v2 \
+  --timesteps 5000000 --n-envs 8 --seed 42 \
+  --run-name phase8_sac_random_v2_seed42
+
+# Phase 8: build the full 3-seed PPO-vs-SAC comparison manifest
+.venv/bin/python phase8_compare.py \
+  --seeds 42 43 44 \
+  --timesteps 5000000 \
+  --n-envs 8 \
+  --manifest results/phase8_manifest.json
+
 # Evaluate on Sprint, Grand Prix, and procedural seeds 1001/1002/1003
 .venv/bin/python evaluate.py models/ppo_random_v2_seed42_final.zip \
   --tracks held-out --episodes 20 --output results/phase4_seed42.json
 
+# Evaluate a Phase 8 SAC model on the same held-out set
+.venv/bin/python evaluate.py models/phase8/sac/phase8_sac_random_v2_seed42_final.zip \
+  --algo sac --tracks held-out --episodes 20 \
+  --output results/phase8/phase8_sac_random_v2_seed42_heldout.json
+
+# Evaluate a Phase 7d normalized run with its saved VecNormalize stats
+.venv/bin/python evaluate.py models/phase7/<run>_final.zip \
+  --vec-normalize models/phase7/<run>_final_vecnormalize.pkl \
+  --tracks held-out --episodes 20
+
 # Phase 3 single-track metrics remain available
 .venv/bin/python evaluate.py models/ppo_sprint_v2_seed42_final.zip \
   --tracks sprint --reward-profile v2 --episodes 20
+
+# Phase 9: held-out evaluation with lap time + trajectory capture
+.venv/bin/python evaluate.py models/phase4/v2/seed42/phase4_v2_seed42/best_model.zip \
+  --tracks held-out --episodes 100 --record-trajectories 1 \
+  --output results/phase9/phase4_v2_seed42_heldout.json
+
+# Phase 9: report figures from the evaluation artifacts
+.venv/bin/python phase9_figures.py trajectory \
+  results/phase9/phase4_v2_seed42_heldout.trajectories.json \
+  --track grand-prix --out results/phase9/figures/traj_grand-prix.png
+.venv/bin/python phase9_figures.py success \
+  --group "Phase 4" results/phase4_v2_seed4*_heldout_final.json \
+  --out results/phase9/figures/success.png
+.venv/bin/python phase9_figures.py curves \
+  --group PPO logs/phase4/v2/seed4*/phase4_v2_seed4*/evaluations.npz \
+  --out results/phase9/figures/curves.png
+.venv/bin/python phase9_figures.py raycast \
+  models/phase4/v2/seed42/phase4_v2_seed42/best_model.zip \
+  --tracks held-out --episodes 5 --out results/phase9/figures/raycast.png
 ```
 
 The committed model and TensorBoard files use Git LFS. Run `git lfs pull` before

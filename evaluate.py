@@ -1,4 +1,4 @@
-"""Headless PPO evaluation on fixed held-out racing tracks."""
+"""Headless evaluation on fixed held-out racing tracks."""
 
 import argparse
 from collections import Counter
@@ -6,14 +6,18 @@ import json
 from pathlib import Path
 
 import numpy as np
-from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack
+from stable_baselines3 import PPO, SAC
+from stable_baselines3.common.vec_env import DummyVecEnv, VecFrameStack, VecNormalize
 
 from src.env.racing_env import REWARD_PROFILES, RacingEnv
 from src.track.random_track import HELD_OUT_TRACK_IDS, create_held_out_track
 
 
 N_STACK = 4
+ALGORITHMS = {
+    "ppo": PPO,
+    "sac": SAC,
+}
 
 
 def _resolve_model_path(value):
@@ -32,9 +36,36 @@ def _resolve_model_path(value):
     return path
 
 
+def _resolve_vec_normalize_path(value):
+    if value is None:
+        return None
+    path = Path(value)
+    if not path.exists():
+        raise FileNotFoundError(f"VecNormalize stats not found: {value}")
+    return path
+
+
 def _mean_std(values):
     values = np.asarray(values, dtype=np.float64)
     return {"mean": float(np.mean(values)), "std": float(np.std(values))}
+
+
+def _lap_time_stats(results):
+    """Pool every completed-lap time across episodes into mean/std/count.
+
+    Lap time is only defined for episodes that finished at least one lap, so an
+    episode contributes zero or more samples. Returns ``None`` means/std when no
+    lap was completed anywhere in the set.
+    """
+    lap_times = [lap for result in results for lap in result["lap_times"]]
+    if not lap_times:
+        return {"mean": None, "std": None, "laps_timed": 0}
+    lap_times = np.asarray(lap_times, dtype=np.float64)
+    return {
+        "mean": float(np.mean(lap_times)),
+        "std": float(np.std(lap_times)),
+        "laps_timed": int(lap_times.size),
+    }
 
 
 def _summarize_results(results):
@@ -42,6 +73,7 @@ def _summarize_results(results):
     return {
         "episodes": len(results),
         "success_rate": float(np.mean([result["success"] for result in results])),
+        "lap_time": _lap_time_stats(results),
         "return": _mean_std([result["return"] for result in results]),
         "steps": _mean_std([result["steps"] for result in results]),
         "progress": _mean_std([result["progress"] for result in results]),
@@ -68,6 +100,9 @@ def _evaluate_track(
     episodes,
     seed,
     max_episode_steps,
+    vec_normalize_path=None,
+    record_trajectories=0,
+    frame_stack=True,
 ):
     def make_env():
         return RacingEnv(
@@ -78,10 +113,17 @@ def _evaluate_track(
             reward_profile=reward_profile,
         )
 
-    env = VecFrameStack(DummyVecEnv([make_env]), n_stack=N_STACK)
+    env = DummyVecEnv([make_env])
+    if vec_normalize_path is not None:
+        env = VecNormalize.load(str(vec_normalize_path), env)
+        env.training = False
+        env.norm_reward = False
+    if frame_stack:
+        env = VecFrameStack(env, n_stack=N_STACK)
     env.seed(seed)
     obs = env.reset()
     results = []
+    trajectories = []
 
     try:
         for episode_index in range(episodes):
@@ -89,6 +131,8 @@ def _evaluate_track(
             speeds = []
             lateral_errors = []
             heading_errors = []
+            recording = episode_index < record_trajectories
+            path = [] if recording else None
 
             while True:
                 action, _ = model.predict(obs, deterministic=True)
@@ -98,14 +142,26 @@ def _evaluate_track(
                 speeds.append(info["speed"])
                 lateral_errors.append(abs(info["e_y"]))
                 heading_errors.append(abs(info["e_psi"]))
+                if recording:
+                    path.append([info["car_x"], info["car_y"]])
 
                 if dones[0]:
+                    if recording:
+                        trajectories.append(
+                            {
+                                "episode": episode_index + 1,
+                                "track_seed": info["track_seed"],
+                                "success": bool(info["laps"] > 0),
+                                "path": path,
+                            }
+                        )
                     results.append(
                         {
                             "episode": episode_index + 1,
                             "return": episode_return,
                             "steps": int(info["steps"]),
                             "laps": int(info["laps"]),
+                            "lap_times": list(info["lap_times"]),
                             "success": bool(info["laps"] > 0),
                             "progress": float(info["total_progress"]),
                             "progress_fraction": float(info["progress_fraction"]),
@@ -136,6 +192,8 @@ def _evaluate_track(
     summary["track_length"] = results[0]["track_length"]
     summary["track_width"] = results[0]["track_width"]
     summary["episode_results"] = results
+    if record_trajectories:
+        summary["trajectories"] = trajectories
     return summary
 
 
@@ -146,9 +204,15 @@ def evaluate(
     episodes,
     seed,
     max_episode_steps,
+    vec_normalize_path=None,
+    algo="ppo",
+    record_trajectories=0,
+    frame_stack=True,
 ):
     model_path = _resolve_model_path(model_path)
-    model = PPO.load(model_path, device="cpu")
+    vec_normalize_path = _resolve_vec_normalize_path(vec_normalize_path)
+    model_cls = ALGORITHMS[algo]
+    model = model_cls.load(model_path, device="cpu")
     tracks = {}
     all_results = []
 
@@ -160,13 +224,18 @@ def evaluate(
             episodes=episodes,
             seed=seed + track_index,
             max_episode_steps=max_episode_steps,
+            vec_normalize_path=vec_normalize_path,
+            record_trajectories=record_trajectories,
+            frame_stack=frame_stack,
         )
         tracks[track_id] = track_summary
         all_results.extend(track_summary["episode_results"])
 
     return {
         "model": str(model_path),
+        "algorithm": algo,
         "reward_profile": reward_profile,
+        "vec_normalize": str(vec_normalize_path) if vec_normalize_path else None,
         "seed": seed,
         "episodes_per_track": episodes,
         "track_ids": list(track_ids),
@@ -177,7 +246,13 @@ def evaluate(
 
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("model", help="Path to an SB3 PPO model (.zip optional)")
+    parser.add_argument("model", help="Path to an SB3 model (.zip optional)")
+    parser.add_argument(
+        "--algo",
+        choices=sorted(ALGORITHMS),
+        default="ppo",
+        help="Model algorithm used for loading.",
+    )
     parser.add_argument("--reward-profile", choices=sorted(REWARD_PROFILES), default="v2")
     parser.add_argument(
         "--tracks",
@@ -189,10 +264,34 @@ def parse_args(argv=None):
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--max-episode-steps", type=int, default=6000)
+    parser.add_argument(
+        "--vec-normalize",
+        help="Optional VecNormalize .pkl stats saved by Phase 7d training.",
+    )
     parser.add_argument("--output", type=Path, help="Optional JSON result path")
+    parser.add_argument(
+        "--record-trajectories",
+        type=int,
+        default=0,
+        help="Phase 9: record car (x, y) paths for the first N episodes per "
+        "track. Written to <output>.trajectories.json when --output is set.",
+    )
+    parser.add_argument(
+        "--no-frame-stack",
+        action="store_true",
+        help="Evaluate without VecFrameStack; required for SAC models trained "
+        "with train_sac.py (which does not use frame stacking).",
+    )
     args = parser.parse_args(argv)
     if args.episodes < 1 or args.max_episode_steps < 1:
         parser.error("episodes and max-episode-steps must be positive")
+    if args.record_trajectories < 0:
+        parser.error("record-trajectories must be non-negative")
+    if args.record_trajectories > 0 and args.output is None:
+        parser.error(
+            "--record-trajectories requires --output (trajectories are written "
+            "to <output>.trajectories.json)"
+        )
     if "held-out" in args.tracks:
         if len(args.tracks) != 1:
             parser.error("'held-out' cannot be combined with individual tracks")
@@ -209,12 +308,32 @@ def main(argv=None):
         episodes=args.episodes,
         seed=args.seed,
         max_episode_steps=args.max_episode_steps,
+        vec_normalize_path=args.vec_normalize,
+        algo=args.algo,
+        record_trajectories=args.record_trajectories,
+        frame_stack=not args.no_frame_stack,
     )
+
+    # Split bulky trajectory paths into a sidecar so the metrics JSON stays lean.
+    trajectories = {
+        track_id: track.pop("trajectories")
+        for track_id, track in summary["tracks"].items()
+        if "trajectories" in track
+    }
+
     rendered = json.dumps(summary, indent=2)
     print(rendered)
     if args.output:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(rendered + "\n", encoding="utf-8")
+        if trajectories:
+            traj_path = args.output.with_suffix(".trajectories.json")
+            traj_path.write_text(
+                json.dumps({"model": summary["model"], "tracks": trajectories})
+                + "\n",
+                encoding="utf-8",
+            )
+            print(f"Trajectories saved to {traj_path}")
 
 
 if __name__ == "__main__":

@@ -72,6 +72,8 @@ class Opponent:
         self.mode = mode
         self.speed = float(speed)
         self.s = float(initial_s)
+        self._fixed_position = tuple(float(v) for v in car.position)
+        self._fixed_angle = float(car.angle)
 
     @property
     def position(self) -> np.ndarray:
@@ -79,6 +81,8 @@ class Opponent:
 
     def update(self, track: Track, dt: float) -> None:
         if self.mode == "stationary":
+            self.car.body.position = self._fixed_position
+            self.car.body.angle = self._fixed_angle
             self.car.body.linearVelocity = (0.0, 0.0)
             self.car.body.angularVelocity = 0.0
             return
