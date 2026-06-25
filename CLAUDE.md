@@ -8,7 +8,13 @@ A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as
 
 ## Commands
 
-The project uses a `.venv` at the repo root (Python 3.12). Always activate it or prefix commands with `.venv/bin/python`.
+The project uses a `.venv` at the repo root (Python 3.12). Always activate it or prefix commands with `.venv/bin/python` (POSIX) / `.venv\Scripts\python.exe` (Windows).
+
+**Windows / environment notes** (verified on Windows 11, Python 3.12, SB3 2.9):
+- Set up with [`uv`](https://docs.astral.sh/uv/): `uv venv --python 3.12 && uv pip install -r requirements.txt`. `box2d` installs from a prebuilt wheel — no compiler needed.
+- **Set `PYTHONUTF8=1`** when training/evaluating on Windows: the startup banner prints `→`/`×`, which crash under the default cp1252 console codec (`UnicodeEncodeError`) before training starts.
+- **SB3 ≥ 2.9 fix (already applied in `train.py`):** with `--vec-normalize-reward` (`norm_obs=False`), SB3 no longer creates `obs_rms`, so `SyncVecNormalizeCallback._on_step` must guard `obs_rms`/`ret_rms` behind `hasattr` or it crashes on the first step. *(Still needs merging to `master`.)*
+- The commands below use POSIX `.venv/bin/python`; on Windows swap in `.venv\Scripts\python.exe` and prefix `PYTHONUTF8=1`.
 
 ```bash
 # One-time setup
@@ -40,6 +46,37 @@ tensorboard --logdir logs/
 .venv/bin/pytest tests/ -v
 .venv/bin/pytest tests/test_racing_env.py::test_observation_shape   # single test
 ```
+
+### Phase 7 — GAE ablation + auxiliary task + reward normalization (verified, seed 44)
+
+```bash
+# Full GAE ablation (5 values), with Phase 7a aux head + Phase 7d reward norm.
+# Each value trains 5M steps; phase7_ablation runs them sequentially.
+# (Windows: prefix PYTHONUTF8=1 and use .venv\Scripts\python.exe.)
+.venv/bin/python phase7_ablation.py --gae-values 0.0 0.5 0.9 0.95 1.0 --seeds 44 \
+  --track-mode random --reward-profile v2 --timesteps 5000000 --n-envs 8 \
+  --vec-normalize-reward --aux-raycast-prediction \
+  --manifest results/phase7_seed44_manifest.json --execute
+
+# Held-out evaluation for one GAE value (best_model is validation-seed-2001 selected)
+.venv/bin/python evaluate.py \
+  models/phase7/phase7_gae0p95_random_v2_seed44_normrew_auxray/best_model.zip \
+  --reward-profile v2 --tracks held-out --episodes 20 \
+  --output results/phase7/phase7_gae0p95_seed44_heldout.json
+
+# Ablation figures (one --group per GAE value; add seeds 42/43 npz later for bands)
+.venv/bin/python phase9_figures.py curves \
+  --group "GAE 0.95" logs/phase7/phase7_gae0p95_random_v2_seed44_normrew_auxray/evaluations.npz \
+  --out results/phase7/figures/phase7_lambda_curves.png
+
+# Watch a Phase 7 (aux-policy) model on a chosen unseen track. Needed because
+# watch_trained.py hardcodes Sprint and does not import AuxRaycastActorCriticPolicy.
+.venv/bin/python watch_phase7.py \
+  models/phase7/phase7_gae0p95_random_v2_seed44_normrew_auxray/best_model.zip \
+  --track grand-prix     # random | sprint | grand-prix | procedural-1001/1002/1003
+```
+
+Seed-44 result (single seed): **GAE λ=0.95 is the bias–variance sweet spot** — 99% zero-shot lap success, 2.1 wall hits, ~262 km/h. λ=0.0 is safe-but-slow (high bias), λ=1.0 fast-but-scrappier (high variance), λ=0.5 weakest (86%).
 
 ## Architecture
 
