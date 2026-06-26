@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO/SAC agents to race autonomously using only on-board sensors. Phases 1–4 are complete; the next planned work is the Phase 5 multi-car curriculum.
+A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO/SAC agents to race autonomously using only on-board sensors. Phases 1–7 are complete (Phase 7 GAE ablation seed 43 done; λ=1.0 run stopped at 2.6M/5M steps). Next: Phase 8 SAC baseline.
 
 ## Commands
 
@@ -88,8 +88,11 @@ See `NEXT_PHASE.md` for the full 10-phase plan. Current status:
 - **Phase 2** (PPO baseline on Sprint Circuit) ✓ complete; artifacts use Git LFS
 - **Phase 3** (reward iteration + reproducible evaluation) ✓ complete; three seeds per reward profile
 - **Phase 4** (domain randomization + held-out track evaluation) ✓ complete; three 5M-step seeds
-- **Phase 5** (multi-car curriculum) — next
-- **Phases 6–10** — self-play, advanced experiments, SAC, evaluation, report
+- **Phase 5** (multi-car curriculum 5a→5e) ✓ complete; seed 42 only; best model `models/phase5/v3/seed42/5e_v3_seed42/best_model.zip`
+- **Phase 6** (self-play opponent pool) ✓ complete as Phase 5e; see NEXT_PHASE.md note
+- **Phase 7** (advanced techniques — GAE/n-step ablation + aux raycast + reward normalisation) ✓ seed 43; λ ∈ {0.0, 0.5, 0.9, 0.95} fully trained (5M steps each); λ=1.0 stopped at 2.6M steps; best models in `models/phase7/`
+- **Phase 8** (SAC comparison baseline) — next
+- **Phases 9–10** — evaluation, report
 
 ## Verified Experiment Results
 
