@@ -21,6 +21,7 @@ for stage_cfg in "5b:200000" "5c:750000" "5d:500000" "5e:1500000"; do
         --run-name "$RUN"
         --log-dir logs/phase5
         --model-dir "$MODEL_DIR"
+        --no-progress-bar
     )
     if [ "$STAGE" = "5e" ]; then
         CMD+=(--pool-dir "${MODEL_DIR}/pool")
