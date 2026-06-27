@@ -38,6 +38,8 @@ from src.track.random_track import (
     create_validation_track,
 )
 from src.env.racing_env import REWARD_PROFILES, RacingEnv
+from src.env.opponents import CURRICULUM_OPPONENTS, CURRICULUM_STAGES
+from src.env.pool import CheckpointPool
 from src.rl.auxiliary import (
     AuxRaycastActorCriticPolicy,
     AuxRaycastPredictionCallback,
@@ -77,7 +79,15 @@ def _sprint_track():
     return Track.create_sprint_track(track_width=14)
 
 
-def make_env(track_mode="sprint", reward_profile="v2", max_episode_steps=6000):
+def make_env(
+    track_mode="sprint",
+    reward_profile="v2",
+    max_episode_steps=6000,
+    curriculum_stage=None,
+    pool_dir=None,
+):
+    opponent_spec = CURRICULUM_OPPONENTS[curriculum_stage] if curriculum_stage else None
+
     def _init():
         if track_mode == "random":
             track_kwargs = {"track_generator": RandomTrackGenerator()}
@@ -90,6 +100,8 @@ def make_env(track_mode="sprint", reward_profile="v2", max_episode_steps=6000):
             randomize_start=(track_mode == "validation"),
             max_episode_steps=max_episode_steps,
             reward_profile=reward_profile,
+            opponent_spec=opponent_spec,
+            pool_dir=pool_dir,
             **track_kwargs,
         )
         return env
@@ -115,7 +127,8 @@ class SyncVecNormalizeCallback(BaseCallback):
 
     def _on_step(self):
         if self._train_vn is not None and self._eval_vn is not None:
-            self._eval_vn.obs_rms = self._train_vn.obs_rms
+            if hasattr(self._train_vn, "obs_rms"):
+                self._eval_vn.obs_rms = self._train_vn.obs_rms
             self._eval_vn.ret_rms = self._train_vn.ret_rms
         return True
 
@@ -135,6 +148,9 @@ class RacingMetricsCallback(BaseCallback):
         self._ep_track_lengths = []
         self._ep_track_widths = []
         self._end_reasons = Counter()
+        self._ep_car_collisions = []
+        self._ep_overtakes = []
+        self._ep_car_contact_steps = []
 
     def _on_step(self):
         for info in self.locals.get("infos", []):
@@ -149,6 +165,9 @@ class RacingMetricsCallback(BaseCallback):
                 self._ep_track_lengths.append(info.get("track_length", 0.0))
                 self._ep_track_widths.append(info.get("track_width", 0.0))
                 self._end_reasons[info.get("termination_reason") or "unknown"] += 1
+            self._ep_car_collisions.append(info.get("car_collisions", 0))
+            self._ep_overtakes.append(info.get("overtake_count", 0))
+            self._ep_car_contact_steps.append(info.get("car_contact_steps", 0))
 
         if len(self._ep_wall_hits) >= 10:               # log every 10 episodes
             self.logger.record("racing/mean_wall_hits", np.mean(self._ep_wall_hits))
@@ -173,6 +192,10 @@ class RacingMetricsCallback(BaseCallback):
             episode_count = sum(self._end_reasons.values())
             for reason, count in self._end_reasons.items():
                 self.logger.record(f"racing/end_{reason}", count / episode_count)
+            if any(self._ep_car_collisions):
+                self.logger.record("racing/mean_car_collisions", np.mean(self._ep_car_collisions))
+                self.logger.record("racing/mean_overtakes", np.mean(self._ep_overtakes))
+                self.logger.record("racing/mean_car_contact_steps", np.mean(self._ep_car_contact_steps))
             self._ep_wall_hits.clear()
             self._ep_laps.clear()
             self._ep_progress.clear()
@@ -181,6 +204,30 @@ class RacingMetricsCallback(BaseCallback):
             self._ep_track_lengths.clear()
             self._ep_track_widths.clear()
             self._end_reasons.clear()
+            self._ep_car_collisions.clear()
+            self._ep_overtakes.clear()
+            self._ep_car_contact_steps.clear()
+        return True
+
+
+class PoolSnapshotCallback(BaseCallback):
+    """Periodically saves the current policy into the checkpoint pool for 5e self-play."""
+
+    def __init__(self, pool: "CheckpointPool", snapshot_freq: int) -> None:
+        super().__init__()
+        self.pool = pool
+        self.snapshot_freq = snapshot_freq
+        self._last_snapshot = 0
+
+    def _on_step(self) -> bool:
+        if self.num_timesteps - self._last_snapshot >= self.snapshot_freq:
+            self.pool.add(self.model, self.num_timesteps)
+            self._last_snapshot = self.num_timesteps
+            self.logger.record("pool/pool_size", self.pool.size())
+            steps = self.pool.snapshot_steps()
+            self.logger.record("pool/mean_age_steps", float(np.mean(steps)))
+            self.logger.record("pool/oldest_step", int(min(steps)))
+            self.logger.record("pool/newest_step", int(max(steps)))
         return True
 
 
@@ -279,10 +326,38 @@ def parse_args(argv=None):
     parser.add_argument("--model-dir", default="models")
     parser.add_argument("--run-name")
     parser.add_argument("--no-progress-bar", action="store_true")
+    parser.add_argument(
+        "--curriculum-stage",
+        choices=CURRICULUM_STAGES,
+        default=None,
+        help="Phase 5 curriculum stage. Spawns opponents per CURRICULUM_OPPONENTS.",
+    )
+    parser.add_argument(
+        "--load-checkpoint",
+        type=str,
+        default=None,
+        help="Path to a .zip checkpoint to warm-start from (optimizer state reset).",
+    )
+    parser.add_argument(
+        "--pool-dir",
+        type=str,
+        default=None,
+        help="Checkpoint pool directory for stage 5e self-play.",
+    )
+    parser.add_argument(
+        "--snapshot-freq",
+        type=int,
+        default=200_000,
+        help="Steps between pool snapshots for stage 5e (default 200,000).",
+    )
     args = parser.parse_args(argv)
 
     if args.timesteps is None:
         args.timesteps = 5_000_000 if args.track_mode == "random" else 1_000_000
+    if args.curriculum_stage == "5e" and not args.pool_dir:
+        parser.error("--pool-dir is required when --curriculum-stage 5e")
+    if args.curriculum_stage and args.reward_profile == "v2":
+        args.reward_profile = "v3"
     if args.n_envs < 1 or args.n_steps < 2 or args.timesteps < 1:
         parser.error("n-envs >= 1, n-steps >= 2, and timesteps >= 1 are required")
     if not 0.0 <= args.gamma <= 1.0:
@@ -331,11 +406,24 @@ def main(argv=None):
     print(f"  Normalize : reward={'yes' if args.vec_normalize_reward else 'no'}")
     aux_label = "yes" if args.aux_raycast_prediction else "no"
     print(f"  Auxiliary : next-raycast prediction={aux_label}")
+    print(f"  Curriculum: {args.curriculum_stage or 'none'}")
+    if args.load_checkpoint:
+        print(f"  Checkpoint: {args.load_checkpoint}")
     print(f"  Timesteps : {args.timesteps:,}")
     print(f"  Logs      : {args.log_dir}  →  tensorboard --logdir {args.log_dir}")
     print("=" * 60)
     print("Override hardware:  python train.py --n-envs 8 --device cpu")
     print()
+
+    # Bootstrap pool before building envs so workers find it non-empty on first reset.
+    pool = None
+    if args.curriculum_stage == "5e":
+        pool = CheckpointPool(args.pool_dir)
+        if pool.size() == 0 and args.load_checkpoint:
+            ckpt = args.load_checkpoint
+            if not ckpt.endswith(".zip"):
+                ckpt += ".zip"
+            pool.add_from_path(ckpt, step=0)
 
     # --- Training envs (SubprocVecEnv = one OS process per env, true parallelism) ---
     train_env = make_vec_env(
@@ -343,6 +431,8 @@ def main(argv=None):
             track_mode=args.track_mode,
             reward_profile=args.reward_profile,
             max_episode_steps=args.max_episode_steps,
+            curriculum_stage=args.curriculum_stage,
+            pool_dir=args.pool_dir,
         ),
         n_envs=args.n_envs,
         seed=args.seed,
@@ -362,6 +452,8 @@ def main(argv=None):
             track_mode=eval_track_mode,
             reward_profile=args.reward_profile,
             max_episode_steps=args.max_episode_steps,
+            curriculum_stage=args.curriculum_stage,
+            pool_dir=args.pool_dir,
         ),
         n_envs=1,
         seed=args.seed + 99,
@@ -380,23 +472,35 @@ def main(argv=None):
         if args.aux_raycast_prediction
         else "MlpPolicy"
     )
-    model = PPO(
-        policy,
-        train_env,
-        policy_kwargs=dict(net_arch=[256, 256]),
-        n_steps=args.n_steps,
-        batch_size=args.batch_size,
-        n_epochs=args.n_epochs,
-        gamma=args.gamma,
-        gae_lambda=args.gae_lambda,
-        clip_range=0.2,
-        ent_coef=0.01,
-        learning_rate=3e-4,
-        verbose=1,
-        tensorboard_log=args.log_dir,
-        seed=args.seed,
-        device=args.device,
-    )
+    if args.load_checkpoint:
+        ckpt = args.load_checkpoint
+        if not os.path.exists(ckpt) and not ckpt.endswith(".zip"):
+            ckpt += ".zip"
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError(f"Checkpoint not found: {args.load_checkpoint}")
+        print(f"Loading PPO weights from {ckpt} (optimizer state reset).")
+        model = PPO.load(ckpt, env=train_env, device=args.device, tensorboard_log=args.log_dir)
+        model.n_steps = args.n_steps
+        model.batch_size = args.batch_size
+        model.seed = args.seed
+    else:
+        model = PPO(
+            policy,
+            train_env,
+            policy_kwargs=dict(net_arch=[256, 256]),
+            n_steps=args.n_steps,
+            batch_size=args.batch_size,
+            n_epochs=args.n_epochs,
+            gamma=args.gamma,
+            gae_lambda=args.gae_lambda,
+            clip_range=0.2,
+            ent_coef=0.01,
+            learning_rate=3e-4,
+            verbose=1,
+            tensorboard_log=args.log_dir,
+            seed=args.seed,
+            device=args.device,
+        )
 
     # --- Callbacks ---
     callbacks = [
@@ -418,6 +522,8 @@ def main(argv=None):
     ]
     if args.vec_normalize_reward:
         callbacks.insert(0, SyncVecNormalizeCallback(train_env, eval_env))
+    if pool is not None:
+        callbacks.append(PoolSnapshotCallback(pool, args.snapshot_freq))
     if args.aux_raycast_prediction:
         callbacks.insert(
             1,
