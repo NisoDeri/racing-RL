@@ -214,6 +214,14 @@ class RacingEnv(gym.Env):
         self.track = None
         self.renderer = None
         self.window_closed = False
+        self.follow_camera = True
+        self.show_sensors = True
+        self.show_checkpoints = True
+        self.show_minimap = False
+        self.camera_pan_speed = 60.0
+        self.zoom_multiplier = 1.12
+        self.min_zoom = 0.05
+        self.max_zoom = 5.0
         self.inner_boundary = None
         self.outer_boundary = None
         self.opponents = []
@@ -242,6 +250,7 @@ class RacingEnv(gym.Env):
         self.last_wall_hit_this_step = False
         self._cached_frenet = None
         self._cached_on_track = True
+        self._minimap_race_state = {}
 
     def reset(self, seed=None, options=None):
         """
@@ -301,6 +310,7 @@ class RacingEnv(gym.Env):
             self.car.position, self.car.angle
         )
         self._cached_on_track = self.track.is_inside_track(self.car.position)
+        self._minimap_race_state = {}
 
         obs = self._get_observation()
         info = self._get_info()
@@ -346,6 +356,45 @@ class RacingEnv(gym.Env):
         cars = [self.car] if self.car is not None else []
         cars.extend(opp.car for opp in self.opponents)
         return cars
+
+    def _initial_minimap_progress(self, s):
+        """Treat cars just behind s=0 as being behind the start line, not a lap ahead."""
+        progress = float(s)
+        if progress > self.track.total_length / 2:
+            progress -= self.track.total_length
+        return progress
+
+    def _update_minimap_race_state(self):
+        """Update continuous race progress used by the minimap leaderboard."""
+        if self.track is None:
+            return
+        active_ids = set()
+        for car in self._all_cars():
+            frenet = self.track.get_frenet_coordinates(car.position, car.angle)
+            current_s = float(frenet["s"])
+            active_ids.add(car.car_id)
+            state = self._minimap_race_state.get(car.car_id)
+            if state is None:
+                progress = self._initial_minimap_progress(current_s)
+                state = {"prev_s": current_s, "progress": progress}
+            else:
+                ds = current_s - state["prev_s"]
+                if ds < -self.track.total_length / 2:
+                    ds += self.track.total_length
+                elif ds > self.track.total_length / 2:
+                    ds -= self.track.total_length
+                state["progress"] += ds
+                state["prev_s"] = current_s
+            self._minimap_race_state[car.car_id] = state
+            car.minimap_race_progress = float(state["progress"])
+            car.minimap_laps = max(
+                0,
+                int(np.floor(state["progress"] / self.track.total_length)),
+            )
+
+        for car_id in list(self._minimap_race_state):
+            if car_id not in active_ids:
+                self._minimap_race_state.pop(car_id, None)
 
     def _update_opponents(self):
         for opponent in self.opponents:
@@ -732,15 +781,55 @@ class RacingEnv(gym.Env):
                 self.window_closed = True
                 self.close()
                 return None
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_c:
+                    self.follow_camera = not self.follow_camera
+                elif event.key == pygame.K_v:
+                    self.show_sensors = not self.show_sensors
+                elif event.key in (pygame.K_EQUALS, pygame.K_PLUS, pygame.K_KP_PLUS):
+                    self.renderer.zoom = min(
+                        self.max_zoom,
+                        self.renderer.zoom * self.zoom_multiplier,
+                    )
+                elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                    self.renderer.zoom = max(
+                        self.min_zoom,
+                        self.renderer.zoom / self.zoom_multiplier,
+                    )
 
-        self.renderer.set_camera(self.car.position[0], self.car.position[1])
+        if self.follow_camera:
+            self.renderer.set_camera(self.car.position[0], self.car.position[1])
+        else:
+            keys = pygame.key.get_pressed()
+            pan = self.camera_pan_speed * SIM.time_step / max(self.renderer.zoom, 0.1)
+            dx = (1 if keys[pygame.K_d] else 0) - (1 if keys[pygame.K_a] else 0)
+            dy = (1 if keys[pygame.K_w] else 0) - (1 if keys[pygame.K_s] else 0)
+            if dx or dy:
+                if dx and dy:
+                    pan *= 0.70710678
+                self.renderer.set_camera(
+                    self.renderer.camera_x + dx * pan,
+                    self.renderer.camera_y + dy * pan,
+                )
+
         self.renderer.clear()
         self.renderer.draw_track(self.track)
-        for opp in self.opponents:
-            self.renderer.draw_car(opp.car)
-        self.renderer.draw_car(self.car)
+        if self.show_checkpoints:
+            self.renderer.draw_checkpoints(self.track.get_checkpoint_positions())
 
-        if self.last_ray_distances is not None and self.last_ray_hits is not None:
+        self.renderer.draw_cars(
+            [self.car] + [opp.car for opp in self.opponents],
+            collision_handler=self.world.collision_handler,
+        )
+        if self.show_minimap:
+            self._update_minimap_race_state()
+            self.renderer.draw_minimap(self.track, self._all_cars())
+
+        if (
+            self.show_sensors
+            and self.last_ray_distances is not None
+            and self.last_ray_hits is not None
+        ):
             self.renderer.draw_rays(
                 self.car.position,
                 self.last_ray_distances,
