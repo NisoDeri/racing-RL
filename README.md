@@ -2,7 +2,7 @@
 
 A 2D top-down Formula 1 racing simulator built with **Box2D** physics and **Pygame** rendering, designed as a **Gymnasium-compatible reinforcement learning environment** for training autonomous racing agents.
 
-University project — the goal is to train RL agents (PPO, SAC) that learn to drive a race car around procedurally generated tracks using only on-board sensor observations.
+University project — the goal is to train RL agents (PPO) that learn to drive a race car around procedurally generated tracks using only on-board sensor observations.
 
 ---
 
@@ -12,10 +12,8 @@ University project — the goal is to train RL agents (PPO, SAC) that learn to d
 f1/
 ├── main.py                  # Interactive demo (keyboard-controlled driving)
 ├── train.py                 # PPO fixed/random-track training runner
-├── train_sac.py             # SAC runner for Phase 8 PPO-vs-SAC comparison
 ├── evaluate.py              # Held-out track metrics and JSON output
 ├── phase7_ablation.py       # Phase 7 GAE / auxiliary / normalization command builder
-├── phase8_compare.py        # Phase 8 PPO-vs-SAC command builder
 ├── phase9_figures.py        # Phase 9 report figure generators (trajectory/success/curves/raycast)
 ├── config.py                # All tunable parameters (physics, car, track, sensors, rendering)
 ├── requirements.txt         # Python dependencies
@@ -150,26 +148,9 @@ protections. Use distinct run names so ablation outputs never overwrite each oth
   --vec-normalize-reward \
   --manifest results/phase7_aux_gae_norm_manifest.json
 
-# Phase 8: train SAC as the PPO comparison algorithm
-.venv/bin/python train_sac.py --track-mode random --reward-profile v2 \
-  --timesteps 5000000 --n-envs 8 --seed 42 \
-  --run-name phase8_sac_random_v2_seed42
-
-# Phase 8: build the full 3-seed PPO-vs-SAC comparison manifest
-.venv/bin/python phase8_compare.py \
-  --seeds 42 43 44 \
-  --timesteps 5000000 \
-  --n-envs 8 \
-  --manifest results/phase8_manifest.json
-
 # Evaluate on Sprint, Grand Prix, and procedural seeds 1001/1002/1003
 .venv/bin/python evaluate.py models/ppo_random_v2_seed42_final.zip \
   --tracks held-out --episodes 20 --output results/phase4_seed42.json
-
-# Evaluate a Phase 8 SAC model on the same held-out set
-.venv/bin/python evaluate.py models/phase8/sac/phase8_sac_random_v2_seed42_final.zip \
-  --algo sac --tracks held-out --episodes 20 \
-  --output results/phase8/phase8_sac_random_v2_seed42_heldout.json
 
 # Evaluate a Phase 7d normalized run with its saved VecNormalize stats
 .venv/bin/python evaluate.py models/phase7/<run>_final.zip \
@@ -430,8 +411,7 @@ Since the observation space is track-agnostic, a key experiment is to train on o
 | **Lateral friction** | Tire grip force that resists sideways sliding; the core mechanism enabling cornering |
 | **Aerodynamic downforce** | Vertical force from car bodywork that increases tire grip proportionally to speed² |
 | **PPO** | Proximal Policy Optimization — on-policy RL algorithm well-suited for continuous control |
-| **SAC** | Soft Actor-Critic — off-policy RL algorithm with entropy regularization for exploration |
-| **Stable-Baselines3** | Python library providing reliable implementations of PPO, SAC, and other RL algorithms |
+| **Stable-Baselines3** | Python library providing reliable PPO (and other) RL algorithm implementations |
 | **Lookahead curvature** | Curvature sampled at future points along the track; gives the agent preview of upcoming turns |
 | **Episode** | One run from reset to termination/truncation; the fundamental unit of RL training |
 | **Reward shaping** | Designing the reward signal to guide learning toward desired behavior (fast + on-track driving) |
@@ -448,7 +428,7 @@ Since the observation space is track-agnostic, a key experiment is to train on o
 | `shapely` | Computational geometry (robust track boundary offsetting) |
 | `pygame` | Real-time rendering and user input |
 | `gymnasium` | Standard RL environment API |
-| `stable-baselines3` | RL algorithm implementations (PPO, SAC) |
+| `stable-baselines3` | RL algorithm implementations (PPO) |
 
 ---
 

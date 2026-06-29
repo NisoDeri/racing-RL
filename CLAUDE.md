@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO/SAC agents to race autonomously using only on-board sensors. Phases 1–4 are complete; the next planned work is the Phase 5 multi-car curriculum.
+A 2D top-down F1 racing simulator (Box2D physics + Pygame rendering) designed as a Gymnasium-compatible RL environment. University MSc project — the goal is to train PPO agents to race autonomously using only on-board sensors. Phases 1–4 are complete; the next planned work is the Phase 5 multi-car curriculum.
 
 ## Commands
 
@@ -89,7 +89,7 @@ See `NEXT_PHASE.md` for the full 10-phase plan. Current status:
 - **Phase 3** (reward iteration + reproducible evaluation) ✓ complete; three seeds per reward profile
 - **Phase 4** (domain randomization + held-out track evaluation) ✓ complete; three 5M-step seeds
 - **Phase 5** (multi-car curriculum) — next
-- **Phases 6–10** — self-play, advanced experiments, SAC, evaluation, report
+- **Phases 6–9** — self-play, advanced experiments (GAE ablation), evaluation, report
 
 ## Verified Experiment Results
 
