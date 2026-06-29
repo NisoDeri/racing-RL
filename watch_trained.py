@@ -3,7 +3,7 @@ Watch a trained model drive in real time.
 
 Run after training:
     python watch_trained.py
-    python watch_trained.py models/ppo_sprint_500000_steps.zip   # specific checkpoint
+    python watch_trained.py models/phase2/ppo_sprint_500000_steps.zip   # specific checkpoint
 """
 import sys
 import numpy as np

@@ -231,7 +231,7 @@ Suggested command for the Phase 7b sweep:
   --reward-profile v2 \
   --timesteps 5000000 \
   --n-envs 8 \
-  --manifest results/phase7_gae_manifest.json
+  --manifest results/phase7/phase7_gae_manifest.json
 ```
 
 Add `--aux-raycast-prediction` to include Phase 7a, and add
@@ -328,7 +328,7 @@ Example figure commands:
 
 # Zero-shot success bar chart (Phase 2 vs Phase 4)
 .venv/bin/python phase9_figures.py success \
-  --group "Phase 4" results/phase4_v2_seed4*_heldout_final.json \
+  --group "Phase 4" results/phase4/phase4_v2_seed4*_heldout_final.json \
   --out results/phase9/figures/success.png
 
 # Learning curves with seed bands (PPO)

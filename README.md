@@ -19,6 +19,20 @@ f1/
 ├── requirements.txt         # Python dependencies
 ├── .gitignore
 │
+├── models/
+│   ├── phase2/              # Sprint circuit step checkpoints (Phase 2 baseline)
+│   ├── phase3/              # Reward-shaped models (v1/v2, seeds 42-44)
+│   ├── phase4/              # Domain-randomized models (seeds 42-44)
+│   ├── phase5/              # Multi-car curriculum models (stages 5b-5e)
+│   └── phase7/              # GAE λ ablation models
+│
+├── results/
+│   ├── phase3/              # Phase 3 evaluation JSONs (v1 vs v2, seeds 42-44)
+│   ├── phase4/              # Phase 4 held-out evaluation JSONs
+│   ├── phase5/              # Phase 5 held-out evaluation JSONs (all stages/seeds)
+│   ├── phase7/              # Phase 7 GAE ablation evaluation JSONs
+│   └── phase9/figures/      # Report figures (PNG)
+│
 └── src/
     ├── physics/
     │   ├── world.py         # Box2D world wrapper + CollisionHandler (car/wall contacts)
@@ -123,7 +137,7 @@ protections. Use distinct run names so ablation outputs never overwrite each oth
   --reward-profile v2 \
   --timesteps 5000000 \
   --n-envs 8 \
-  --manifest results/phase7_gae_manifest.json
+  --manifest results/phase7/phase7_gae_manifest.json
 
 # Add reward normalization from Phase 7d; omit --execute to print commands only
 .venv/bin/python phase7_ablation.py \
@@ -171,7 +185,7 @@ protections. Use distinct run names so ablation outputs never overwrite each oth
   results/phase9/phase4_v2_seed42_heldout.trajectories.json \
   --track grand-prix --out results/phase9/figures/traj_grand-prix.png
 .venv/bin/python phase9_figures.py success \
-  --group "Phase 4" results/phase4_v2_seed4*_heldout_final.json \
+  --group "Phase 4" results/phase4/phase4_v2_seed4*_heldout_final.json \
   --out results/phase9/figures/success.png
 .venv/bin/python phase9_figures.py curves \
   --group PPO logs/phase4/v2/seed4*/phase4_v2_seed4*/evaluations.npz \
