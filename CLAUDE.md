@@ -34,7 +34,7 @@ tensorboard --logdir logs/
 
 # Watch a trained model drive
 .venv/bin/python watch_trained.py                                    # loads models/best_model.zip
-.venv/bin/python watch_trained.py models/ppo_sprint_500000_steps.zip # specific checkpoint
+.venv/bin/python watch_trained.py models/phase2/ppo_sprint_500000_steps.zip # specific checkpoint
 
 # Tests (headless, no display required)
 .venv/bin/pytest tests/ -v
@@ -121,4 +121,4 @@ PPO v2 was trained from scratch for 5M transitions on a new validated procedural
 
 All five held-out tracks achieved 100% lap success over 60 episodes each. Sprint remains the main limitation: it averaged 38.05 wall hits because its 14m width is narrower than the 18–28m procedural training distribution. One seed-44 Sprint episode terminated as `stuck_wall` after already completing a lap, so it still counted as successful under the `laps > 0` criterion.
 
-Final evaluation files are `results/phase4_v2_seed{42,43,44}_heldout_final.json`; validation-selected models are `models/phase4/v2/seed*/phase4_v2_seed*/best_model.zip`. The full suite passes: **50 tests passed** on 2026-06-22.
+Final evaluation files are `results/phase4/phase4_v2_seed{42,43,44}_heldout_final.json`; validation-selected models are `models/phase4/v2/seed*/phase4_v2_seed*/best_model.zip`. The full suite passes: **50 tests passed** on 2026-06-22.
