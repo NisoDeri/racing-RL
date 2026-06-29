@@ -163,8 +163,8 @@ protections. Use distinct run names so ablation outputs never overwrite each oth
   --manifest results/phase7_aux_gae_norm_manifest.json
 
 # Evaluate on Sprint, Grand Prix, and procedural seeds 1001/1002/1003
-.venv/bin/python evaluate.py models/ppo_random_v2_seed42_final.zip \
-  --tracks held-out --episodes 20 --output results/phase4_seed42.json
+.venv/bin/python evaluate.py models/phase4/v2/seed42/phase4_v2_seed42/best_model.zip \
+  --tracks held-out --episodes 20 --output results/phase4/phase4_v2_seed42_heldout.json
 
 # Evaluate a Phase 7d normalized run with its saved VecNormalize stats
 .venv/bin/python evaluate.py models/phase7/<run>_final.zip \
@@ -172,7 +172,7 @@ protections. Use distinct run names so ablation outputs never overwrite each oth
   --tracks held-out --episodes 20
 
 # Phase 3 single-track metrics remain available
-.venv/bin/python evaluate.py models/ppo_sprint_v2_seed42_final.zip \
+.venv/bin/python evaluate.py models/phase3/v2/seed42/phase3_v2_seed42_final.zip \
   --tracks sprint --reward-profile v2 --episodes 20
 
 # Phase 9: held-out evaluation with lap time + trajectory capture

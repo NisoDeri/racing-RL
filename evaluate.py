@@ -36,6 +36,40 @@ def _resolve_model_path(value):
     return path
 
 
+def _resolve_reward_profile(model_value, explicit):
+    """Pick the reward profile to score under.
+
+    Prefer an explicit --reward-profile; else read it from a <model>.meta.json
+    sidecar written at train time; else fall back to 'v2' with a warning. v1/v2/
+    v3 differ in TERMINATION rules, not just shaping, so scoring a model under
+    the wrong profile silently corrupts the result.
+    """
+    p = Path(model_value)
+    if p.suffix != ".zip" and not p.exists():
+        p = p.with_suffix(".zip")
+    meta_path = p.with_suffix(".meta.json")
+    meta_profile = None
+    if meta_path.exists():
+        try:
+            meta_profile = json.loads(meta_path.read_text()).get("reward_profile")
+        except Exception:
+            meta_profile = None
+    if explicit is not None:
+        if meta_profile and meta_profile != explicit:
+            print(f"WARNING: --reward-profile '{explicit}' differs from the model's "
+                  f"trained profile '{meta_profile}' ({meta_path.name}); using "
+                  f"'{explicit}' as requested.")
+        return explicit
+    if meta_profile:
+        print(f"Using the model's trained reward profile '{meta_profile}' "
+              f"(from {meta_path.name}).")
+        return meta_profile
+    print("WARNING: no reward-profile metadata found and --reward-profile not set; "
+          "assuming 'v2'. v1/v2/v3 differ in termination as well as shaping, so pass "
+          "--reward-profile to match how the model was trained.")
+    return "v2"
+
+
 def _resolve_vec_normalize_path(value):
     if value is None:
         return None
@@ -253,7 +287,9 @@ def parse_args(argv=None):
         default="ppo",
         help="Model algorithm used for loading.",
     )
-    parser.add_argument("--reward-profile", choices=sorted(REWARD_PROFILES), default="v2")
+    parser.add_argument("--reward-profile", choices=sorted(REWARD_PROFILES), default=None,
+                        help="Reward profile to score under. Default: read from the "
+                        "model's .meta.json sidecar, else 'v2' with a warning.")
     parser.add_argument(
         "--tracks",
         nargs="+",
@@ -301,9 +337,10 @@ def parse_args(argv=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    reward_profile = _resolve_reward_profile(args.model, args.reward_profile)
     summary = evaluate(
         model_path=args.model,
-        reward_profile=args.reward_profile,
+        reward_profile=reward_profile,
         track_ids=args.tracks,
         episodes=args.episodes,
         seed=args.seed,

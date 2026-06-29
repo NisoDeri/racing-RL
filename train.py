@@ -544,6 +544,24 @@ def main(argv=None):
     final_path = os.path.join(args.model_dir, f"{args.run_name}_final")
     model.save(final_path)
     print(f"\nTraining complete. Final model saved to {final_path}.zip")
+
+    # Record the reward profile next to the model so evaluate.py scores it under
+    # the profile it was trained with (v1/v2/v3 differ in termination, not just
+    # shaping). Written for both the final and the validation-best checkpoint.
+    import json as _json
+    _meta = {
+        "reward_profile": args.reward_profile,
+        "n_stack": N_STACK,
+        "curriculum_stage": getattr(args, "curriculum_stage", None),
+        "track_mode": getattr(args, "track_mode", None),
+    }
+    with open(f"{final_path}.meta.json", "w") as _f:
+        _json.dump(_meta, _f, indent=2)
+    _best_dir = os.path.join(args.model_dir, args.run_name)
+    if os.path.isdir(_best_dir):
+        with open(os.path.join(_best_dir, "best_model.meta.json"), "w") as _f:
+            _json.dump(_meta, _f, indent=2)
+    print(f"Reward-profile metadata saved ({args.reward_profile}).")
     vec_normalize = _find_vec_normalize(train_env)
     if vec_normalize is not None:
         stats_path = f"{final_path}_vecnormalize.pkl"
