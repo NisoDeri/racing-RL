@@ -15,9 +15,8 @@ Every methodology choice in this plan is tied to a specific course lecture (1–
 | 5 | Multi-car curriculum (5b→5c→5d) | ✓ seed 42 complete |
 | 6 | Self-play opponent pool | ✓ implemented as **Phase 5e** (see note below) |
 | 7 | Advanced techniques | 7a/7b/7d tooling implemented; full experiment runs pending |
-| 8 | SAC comparison | tooling implemented; full experiment runs pending |
-| 9 | Final evaluation protocol | tooling implemented; full evaluation runs pending |
-| 10 | Report + presentation | pending |
+| 8 | Final evaluation protocol | tooling implemented; full evaluation runs pending |
+| 9 | Report + presentation | pending |
 
 > **Phase 5e = Phase 6.** The AlphaZero-style checkpoint pool self-play described in Phase 6 was implemented as the final curriculum stage `5e`, keeping the warm-start chain (5d → 5e) intact. The implementation is identical to the Phase 6 spec: 200k-step snapshots, 10-snapshot rolling pool, physics-driven `PolicyOpponent` with its own raycast sensors. Best model: `models/phase5/v3/seed42/5e_v3_seed42/best_model.zip` (val reward 11,217 at 1.25M/3M steps).
 
@@ -259,62 +258,15 @@ This gives us a tight, defensible paragraph in the report: "We chose λ=0.95 aft
 
 → **Lecture 5** (n-step prediction) + **Lecture 10** (deadly triad, bias-variance).
 
-### 7c — Prioritized experience replay (only if we add a DDPG/SAC baseline in Phase 8)
-
-If we run a DDPG comparison, swap uniform replay for prioritized replay (SB3 supports this for off-policy methods). Frame it as **Dyna with a non-parametric model** — the replay buffer is effectively a sample-based world model. → **Lecture 8** (Dyna, model-based RL framed as replay).
-
 ### 7d — Adaptive target normalization (Lecture 14)
 
-Reward magnitudes shift dramatically across curriculum stages and randomized tracks. Maintain a running mean/variance of returns and normalize the critic's targets. SB3 has `normalize_advantage=True` (default) for PPO; for DDPG we'd add `VecNormalize`.
+Reward magnitudes shift dramatically across curriculum stages and randomized tracks. Maintain a running mean/variance of returns and normalize the critic's targets. SB3 has `normalize_advantage=True` (default) for PPO; use `VecNormalize` to normalize observations and rewards.
 
 → **Lecture 14** (adaptive normalization for shifting value scales).
 
 ---
 
-## Phase 8 — Comparison algorithm (DDPG or SAC)
-
-**Goal:** the rubric explicitly rewards justifying algorithm choice by *comparing* to alternatives. We pick one off-policy actor-critic as the baseline.
-
-### Recommended: SAC (Soft Actor-Critic)
-
-SAC is the modern improvement on DDPG: it adds entropy regularization to the actor (it gets a bonus for being uncertain, which is the principled answer to "how much should I explore?"). In practice SAC trains more stably than DDPG on continuous control. SB3 has it: `SAC("MlpPolicy", env, ...)`.
-
-### Implementation status
-
-Phase 8 is wired into the tooling:
-
-- `train_sac.py` trains SAC on the same sprint/random track environment contract as PPO.
-- `evaluate.py --algo sac` loads SAC checkpoints and reports the same held-out metrics as PPO.
-- `phase8_compare.py` builds the 3-seed SAC training commands and paired PPO/SAC held-out evaluation commands.
-
-Suggested full comparison command:
-
-```bash
-.venv/bin/python phase8_compare.py \
-  --seeds 42 43 44 \
-  --track-mode random \
-  --reward-profile v2 \
-  --timesteps 5000000 \
-  --n-envs 8 \
-  --manifest results/phase8_manifest.json
-```
-
-Add `--execute` only when ready to launch the training and evaluation commands. For a cheap pre-flight run, lower `--timesteps`, `--buffer-size`, `--learning-starts`, and `--batch-size`.
-
-Train the same way as Phase 4 (5M steps, randomized tracks, 3 seeds). Then compare against PPO on:
-
-- **Sample efficiency:** episodes/steps to reach a target return
-- **Final performance:** mean lap time on eval tracks
-- **Stability:** seed-to-seed variance
-- **Wall-clock training time**
-
-This becomes one of the strongest sections of the report.
-
-→ **Lecture 9** (DDPG / off-policy actor-critic) + **Lecture 10** (deep deterministic policies).
-
----
-
-## Phase 9 — Evaluation protocol
+## Phase 8 — Evaluation protocol
 
 **Goal:** rigorous, reproducible numbers for the report.
 
@@ -329,7 +281,7 @@ This becomes one of the strongest sections of the report.
 
 ### Procedure
 
-For each model (Phase-2 baseline, Phase-4 domain-randomized, Phase-5 multi-agent, Phase-7 auxiliary-task, Phase-8 SAC):
+For each model (Phase-2 baseline, Phase-4 domain-randomized, Phase-5 multi-agent, Phase-7 advanced techniques):
 
 - Freeze the weights.
 - Run 100 evaluation episodes per held-out track (5 tracks × 100 = 500 episodes per model).
@@ -338,7 +290,7 @@ For each model (Phase-2 baseline, Phase-4 domain-randomized, Phase-5 multi-agent
 
 ### Required figures for the report
 
-1. Learning curves: episode return vs timesteps, PPO vs SAC, with seed shaded bands.
+1. Learning curves: episode return vs timesteps with seed shaded bands.
 2. Ablation bar chart: Phase-2 vs Phase-4 vs Phase-7 zero-shot success rates.
 3. Reward-shaping iteration: before/after curves for each fix in Phase 3.
 4. Trajectory overlay: agent path on an unseen track.
@@ -390,19 +342,17 @@ Example figure commands:
   --tracks held-out --episodes 5 --out results/phase9/figures/raycast.png
 ```
 
-The PPO-vs-SAC learning-curve overlay (figure 1) needs Phase 8 SAC runs; the
-`curves` subcommand already accepts multiple `--group`s for that once SAC logs
-exist. All other figures are produced from the existing PPO artifacts.
+All figures are produced from the existing PPO artifacts.
 
 ---
 
-## Phase 10 — Report + presentation
+## Phase 9 — Report + presentation
 
 The 8–20 page report is structured exactly as the rubric dictates:
 
 1. **Project Overview** (~1 page) — F1 RL motivation, what we built, what we showed.
 2. **Problem Formulation** (~2 pages) — pulled directly from Phase 1: state/action/reward formal definitions, transition dynamics (cite Box2D + the F1 physics in `car.py`).
-3. **Methodology** (~5–7 pages) — algorithm choice (PPO + SAC) with Lecture-9 citations, curriculum design with Lecture-14 citations, auxiliary task with Lecture-14 citation, hyperparameter tuning narrative.
+3. **Methodology** (~5–7 pages) — algorithm choice (PPO) with Lecture-9 citations, curriculum design with Lecture-14 citations, GAE ablation with Lecture-5/10 citations, hyperparameter tuning narrative.
 4. **Results** (~4–5 pages) — all five figures above + tables.
 5. **Discussion** (~2 pages) — reward-shaping war stories from Phase 3, limitations, what didn't work, what we'd do with more compute.
 6. **Conclusion** (~1 page).
@@ -427,9 +377,7 @@ These are the open questions where reasonable people will disagree. Decide as a 
    - **n-step / GAE ablation (7b)** — easiest, tight Lecture 5/10 connection, mostly a hyperparam sweep.
    - **Adaptive normalization (7d)** — almost free if we use `VecNormalize`, modest theoretical payoff.
 
-3. **PPO vs SAC as primary?** Plan currently puts PPO as primary, SAC as comparison. Could flip — SAC is more sample-efficient and tends to give better final policies on continuous control, but PPO is more stable and easier to debug. Some teams find DDPG/SAC's replay buffer + Polyak averaging hides bugs longer than PPO's on-policy rollouts.
-
-4. **Compute budget per phase.** With Colab Pro unlimited + local GPUs, this is less constrained, but we should still agree: e.g., "Phase 4: 5M steps × 3 seeds × 2 algorithms = 30M total transitions." Estimate wall-clock and divide across machines.
+3. **Compute budget per phase.** With Colab Pro unlimited + local GPUs, this is less constrained, but we should still agree: e.g., "Phase 4: 5M steps × 3 seeds × 2 algorithms = 30M total transitions." Estimate wall-clock and divide across machines.
 
 5. **Reward weights.** The Phase-1 v1 weights are a starting guess. Plan a half-day calibration session after Phase 2 finishes to retune based on observed failure modes.
 
@@ -450,7 +398,6 @@ This maps every methodological choice in the plan back to the course material, s
 | Actor-Critic for continuous actions — Phase 2 | **Lecture 9** | Policy-based RL, why value-based fails for continuous |
 | Gaussian policy `N(μ, σ²)` over continuous actions — Phase 2 | **Lecture 9** | Defining the policy distribution; parameterizing μ and σ with a NN |
 | PPO clipped objective ("trust region") — Phase 2 | **Lecture 9** | KL-bounded policy updates to prevent catastrophic forgetting |
-| DDPG / SAC off-policy actor-critic — Phase 8 | **Lecture 9** | Off-policy continuous control with replay |
 | Deep function approximation, frame stacking — Phase 1 obs, Phase 2 net | **Lecture 10** | DQN-era tricks: stacked frames for partial observability, replay for decorrelation |
 | Bias-variance tradeoff, deadly triad — Phase 7b discussion | **Lecture 10** | Why n-step / GAE helps stabilize deep RL |
 | Distribution of environments → generalization — Phase 4 | **Lecture 14** | Training on related task distributions instead of one fixed task |
