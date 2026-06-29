@@ -29,8 +29,8 @@ python3.12 -m venv .venv && .venv/bin/pip install -r requirements.txt
 tensorboard --logdir logs/
 
 # Headless evaluation to JSON
-.venv/bin/python evaluate.py models/ppo_random_v2_seed42_final.zip \
-  --tracks held-out --episodes 20 --output results/phase4_seed42.json
+.venv/bin/python evaluate.py models/phase4/v2/seed42/phase4_v2_seed42/best_model.zip \
+  --tracks held-out --episodes 20 --output results/phase4/phase4_v2_seed42_heldout.json
 
 # Watch a trained model drive
 .venv/bin/python watch_trained.py                                    # loads models/best_model.zip
